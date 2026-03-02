@@ -10,12 +10,8 @@ struct IncrementalScorer {
     size: usize,
     positions: Vec<(usize, usize)>,
 
-    // Scores broken down by geometric relationship
-    vertical_score: f32,
-    horizontal_score: f32,
-    positive_diagonal_score: f32,  // slope = 1 (dr == dc, going up-right)
-    negative_diagonal_score: f32,  // slope = -1 (dr == -dc, going down-right)
-    other_score: f32,
+    // Current total score with weights applied
+    total_score: f32,
 }
 
 impl IncrementalScorer {
@@ -24,37 +20,25 @@ impl IncrementalScorer {
         let mut scorer = IncrementalScorer {
             size,
             positions,
-            vertical_score: 0.0,
-            horizontal_score: 0.0,
-            positive_diagonal_score: 0.0,
-            negative_diagonal_score: 0.0,
-            other_score: 0.0,
+            total_score: 0.0,
         };
 
-        // Calculate initial scores
-        scorer.calculate_full_scores();
+        // Calculate initial score
+        scorer.total_score = scorer.calculate_full_score();
 
         scorer
     }
 
-    /// Get total score using current weights
+    /// Get total score
     #[inline]
     fn total_score(&self) -> f32 {
-        VERTICAL_WEIGHT * self.vertical_score
-            + HORIZONTAL_WEIGHT * self.horizontal_score
-            + POSITIVE_DIAGONAL_WEIGHT * self.positive_diagonal_score
-            + NEGATIVE_DIAGONAL_WEIGHT * self.negative_diagonal_score
-            + OTHER_WEIGHT * self.other_score
+        self.total_score
     }
 
-    /// Calculate score contributions for a single value index, broken down by geometry
+    /// Calculate score contribution for a single value index with weights applied
     #[inline]
-    fn calculate_scores_for_value(&self, val_idx: usize) -> (f32, f32, f32, f32, f32) {
-        let mut vertical = 0.0;
-        let mut horizontal = 0.0;
-        let mut positive_diagonal = 0.0;
-        let mut negative_diagonal = 0.0;
-        let mut other = 0.0;
+    fn calculate_score_for_value(&self, val_idx: usize) -> f32 {
+        let mut score = 0.0;
 
         let (r1, c1) = self.positions[val_idx];
 
@@ -89,35 +73,31 @@ impl IncrementalScorer {
             // Distance contribution weighted by combined weight
             let weighted_distance = distance_sq * combined_weight;
 
-            // Classify by geometric relationship and add to appropriate bucket
+            // Classify by geometric relationship and apply weight
             if c1 == c2 {
                 // Same column (vertical alignment)
-                vertical += weighted_distance;
+                score += VERTICAL_WEIGHT * weighted_distance;
             } else if r1 == r2 {
                 // Same row (horizontal alignment)
-                horizontal += weighted_distance;
+                score += HORIZONTAL_WEIGHT * weighted_distance;
             } else if dr == dc {
                 // Positive diagonal (slope = 1)
-                positive_diagonal += weighted_distance;
+                score += POSITIVE_DIAGONAL_WEIGHT * weighted_distance;
             } else if dr == -dc {
                 // Negative diagonal (slope = -1)
-                negative_diagonal += weighted_distance;
+                score += NEGATIVE_DIAGONAL_WEIGHT * weighted_distance;
             } else {
                 // Everything else
-                other += weighted_distance;
+                score += OTHER_WEIGHT * weighted_distance;
             }
         }
 
-        (vertical, horizontal, positive_diagonal, negative_diagonal, other)
+        score
     }
 
-    /// Calculate full scores for all buckets (used for initialization)
-    fn calculate_full_scores(&mut self) {
-        self.vertical_score = 0.0;
-        self.horizontal_score = 0.0;
-        self.positive_diagonal_score = 0.0;
-        self.negative_diagonal_score = 0.0;
-        self.other_score = 0.0;
+    /// Calculate full score (used for initialization)
+    fn calculate_full_score(&self) -> f32 {
+        let mut total = 0.0;
 
         for i in 0..self.positions.len() {
             for j in (i + 1)..self.positions.len() {
@@ -135,43 +115,45 @@ impl IncrementalScorer {
 
                 let weighted_distance = distance_sq * combined_weight;
 
-                // Classify by geometric relationship
+                // Classify by geometric relationship and apply weight
                 if c1 == c2 {
-                    self.vertical_score += weighted_distance;
+                    total += VERTICAL_WEIGHT * weighted_distance;
                 } else if r1 == r2 {
-                    self.horizontal_score += weighted_distance;
+                    total += HORIZONTAL_WEIGHT * weighted_distance;
                 } else if dr == dc {
-                    self.positive_diagonal_score += weighted_distance;
+                    total += POSITIVE_DIAGONAL_WEIGHT * weighted_distance;
                 } else if dr == -dc {
-                    self.negative_diagonal_score += weighted_distance;
+                    total += NEGATIVE_DIAGONAL_WEIGHT * weighted_distance;
                 } else {
-                    self.other_score += weighted_distance;
+                    total += OTHER_WEIGHT * weighted_distance;
                 }
             }
         }
+
+        total
     }
 
-    /// Update scores incrementally after swapping two value indices
+    /// Update score incrementally after swapping two value indices
     /// val_idx1 and val_idx2 are the VALUE indices (0-based, from the positions array)
     fn update_after_swap(&mut self, val_idx1: usize, val_idx2: usize) {
         // Subtract out old contributions from both values
-        let (old_v1, old_h1, old_pd1, old_nd1, old_o1) = self.calculate_scores_for_value(val_idx1);
-        let (old_v2, old_h2, old_pd2, old_nd2, old_o2) = self.calculate_scores_for_value(val_idx2);
+        let old_contribution1 = self.calculate_score_for_value(val_idx1);
+        let old_contribution2 = self.calculate_score_for_value(val_idx2);
 
         // Swap positions
         self.positions.swap(val_idx1, val_idx2);
 
         // Add back new contributions
-        let (new_v1, new_h1, new_pd1, new_nd1, new_o1) = self.calculate_scores_for_value(val_idx1);
-        let (new_v2, new_h2, new_pd2, new_nd2, new_o2) = self.calculate_scores_for_value(val_idx2);
+        let new_contribution1 = self.calculate_score_for_value(val_idx1);
+        let new_contribution2 = self.calculate_score_for_value(val_idx2);
 
-        // Update all scores
+        // Update score
         // Note: we divide by 2 because each pair is counted twice (once from each value's perspective)
-        self.vertical_score += (new_v1 + new_v2 - old_v1 - old_v2) / 2.0;
-        self.horizontal_score += (new_h1 + new_h2 - old_h1 - old_h2) / 2.0;
-        self.positive_diagonal_score += (new_pd1 + new_pd2 - old_pd1 - old_pd2) / 2.0;
-        self.negative_diagonal_score += (new_nd1 + new_nd2 - old_nd1 - old_nd2) / 2.0;
-        self.other_score += (new_o1 + new_o2 - old_o1 - old_o2) / 2.0;
+        self.total_score = self.total_score
+            - old_contribution1 / 2.0
+            - old_contribution2 / 2.0
+            + new_contribution1 / 2.0
+            + new_contribution2 / 2.0;
     }
 
     /// Undo a swap (used when rejecting a move)
