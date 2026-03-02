@@ -13,18 +13,39 @@ use crate::filters::ThresholdKernel;
 pub fn posterize_cmy_spread(
     img: &DynamicImage,
     spread_radius: u32,
+    spread_offset: i32,
+    spread_angle: f32,
 ) -> ImageBuffer<Rgb<u8>, Vec<u8>> {
     let (width, height) = img.dimensions();
 
     // Step 1: Extract C, M, Y channels as separate boolean masks
     let (c_mask, m_mask, y_mask) = extract_cmy_channels(img);
 
-    // Step 2: Spread each channel independently
-    let c_spread = spread_channel(&c_mask, spread_radius);
-    let m_spread = spread_channel(&m_mask, spread_radius);
-    let y_spread = spread_channel(&y_mask, spread_radius);
+    // Step 2: Shift each channel by offset in different directions (120° apart)
+    let c_shifted = if spread_offset > 0 {
+        shift_channel(&c_mask, spread_offset, spread_angle)
+    } else {
+        c_mask.clone()
+    };
 
-    // Step 3: Recombine CMY back to RGB
+    let m_shifted = if spread_offset > 0 {
+        shift_channel(&m_mask, spread_offset, spread_angle + 120.0)
+    } else {
+        m_mask.clone()
+    };
+
+    let y_shifted = if spread_offset > 0 {
+        shift_channel(&y_mask, spread_offset, spread_angle + 240.0)
+    } else {
+        y_mask.clone()
+    };
+
+    // Step 3: Spread each shifted channel independently
+    let c_spread = spread_channel(&c_shifted, spread_radius);
+    let m_spread = spread_channel(&m_shifted, spread_radius);
+    let y_spread = spread_channel(&y_shifted, spread_radius);
+
+    // Step 4: Recombine CMY back to RGB
     let mut output = ImageBuffer::new(width, height);
 
     for y in 0..height {
@@ -33,10 +54,19 @@ pub fn posterize_cmy_spread(
             let m = m_spread.get_pixel(x, y)[0] > 128;
             let y_cmy = y_spread.get_pixel(x, y)[0] > 128;
 
-            // Convert CMY back to RGB
+            // Subtractive color mixing: start with white, subtract each channel
+            // C subtracts red, M subtracts green, Y subtracts blue
+            // When all three are on (C+M+Y), we get white to preserve K channel
             let r = if c { 0 } else { 255 };
             let g = if m { 0 } else { 255 };
             let b = if y_cmy { 0 } else { 255 };
+
+            // If all channels are on, force to white (preserves K channel)
+            let (r, g, b) = if c && m && y_cmy {
+                (255, 255, 255)
+            } else {
+                (r, g, b)
+            };
 
             output.put_pixel(x, y, Rgb([r, g, b]));
         }
@@ -87,7 +117,31 @@ fn extract_cmy_channels(img: &DynamicImage) -> (ImageBuffer<Rgb<u8>, Vec<u8>>, I
     (c_mask, m_mask, y_mask)
 }
 
-/// Spread a single channel mask using morphological dilation
+/// Shift a channel mask by an offset in a given direction
+fn shift_channel(mask: &ImageBuffer<Rgb<u8>, Vec<u8>>, offset: i32, angle_degrees: f32) -> ImageBuffer<Rgb<u8>, Vec<u8>> {
+    let (width, height) = mask.dimensions();
+    let mut output = ImageBuffer::new(width, height);
+
+    // Convert angle to radians
+    let angle_rad = angle_degrees.to_radians();
+    let dx = (angle_rad.cos() * offset as f32).round() as i32;
+    let dy = (angle_rad.sin() * offset as f32).round() as i32;
+
+    for y in 0..height {
+        for x in 0..width {
+            // Sample from shifted position
+            let src_x = (x as i32 - dx).clamp(0, width as i32 - 1) as u32;
+            let src_y = (y as i32 - dy).clamp(0, height as i32 - 1) as u32;
+
+            let pixel = mask.get_pixel(src_x, src_y);
+            output.put_pixel(x, y, *pixel);
+        }
+    }
+
+    output
+}
+
+/// Spread a single channel mask using circular dilation
 /// Input: grayscale image where 255 = channel on, 0 = channel off
 fn spread_channel(mask: &ImageBuffer<Rgb<u8>, Vec<u8>>, radius: u32) -> ImageBuffer<Rgb<u8>, Vec<u8>> {
     if radius == 0 {
@@ -95,54 +149,46 @@ fn spread_channel(mask: &ImageBuffer<Rgb<u8>, Vec<u8>>, radius: u32) -> ImageBuf
     }
 
     let (width, height) = mask.dimensions();
-    let mut current = mask.clone();
+    let mut output = ImageBuffer::new(width, height);
+    let radius_f = radius as f32;
+    let radius_sq = (radius_f * radius_f) as i32;
 
-    // Dilate iteratively, one pixel at a time, for 'radius' iterations
-    for _ in 0..radius {
-        let mut next = ImageBuffer::new(width, height);
+    for y in 0..height {
+        for x in 0..width {
+            let mut is_on = false;
 
-        for y in 0..height {
-            for x in 0..width {
-                let original = current.get_pixel(x, y)[0];
+            // Check all pixels within circular radius
+            let y_min = (y as i32 - radius as i32).max(0) as u32;
+            let y_max = (y as i32 + radius as i32).min(height as i32 - 1) as u32;
+            let x_min = (x as i32 - radius as i32).max(0) as u32;
+            let x_max = (x as i32 + radius as i32).min(width as i32 - 1) as u32;
 
-                // If already on (255), keep it
-                if original > 128 {
-                    next.put_pixel(x, y, Rgb([255, 255, 255]));
-                    continue;
-                }
+            for ny in y_min..=y_max {
+                for nx in x_min..=x_max {
+                    // Check if within circular distance
+                    let dx = nx as i32 - x as i32;
+                    let dy = ny as i32 - y as i32;
+                    let dist_sq = dx * dx + dy * dy;
 
-                // Check immediate neighbors (4-connected)
-                let mut is_on = false;
-
-                // Check up, down, left, right
-                let neighbors = [
-                    (x as i32, y as i32 - 1), // up
-                    (x as i32, y as i32 + 1), // down
-                    (x as i32 - 1, y as i32), // left
-                    (x as i32 + 1, y as i32), // right
-                ];
-
-                for (nx, ny) in neighbors {
-                    if nx >= 0 && nx < width as i32 && ny >= 0 && ny < height as i32 {
-                        let neighbor = current.get_pixel(nx as u32, ny as u32)[0];
-
-                        // If any neighbor is on, turn this pixel on
-                        if neighbor > 128 {
+                    if dist_sq <= radius_sq {
+                        let pixel = mask.get_pixel(nx, ny)[0];
+                        if pixel > 128 {
                             is_on = true;
                             break;
                         }
                     }
                 }
-
-                let value = if is_on { 255 } else { 0 };
-                next.put_pixel(x, y, Rgb([value, value, value]));
+                if is_on {
+                    break;
+                }
             }
-        }
 
-        current = next;
+            let value = if is_on { 255 } else { 0 };
+            output.put_pixel(x, y, Rgb([value, value, value]));
+        }
     }
 
-    current
+    output
 }
 
 /// Combine posterized CMY with dithered K channel

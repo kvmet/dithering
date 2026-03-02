@@ -100,6 +100,14 @@ struct Cli {
     /// Spread radius for posterize mode (grows CMY color areas)
     #[arg(long, value_name = "PIXELS", default_value = "3", help = "Spread radius for posterize mode (pixels)")]
     spread_radius: u32,
+
+    /// Spread offset for posterize mode (shifts CMY channels before spreading)
+    #[arg(long, value_name = "PIXELS", default_value = "0", help = "Offset distance for CMY channel shifting")]
+    spread_offset: i32,
+
+    /// Spread angle for posterize mode (direction to shift CMY channels, in degrees)
+    #[arg(long, value_name = "DEGREES", default_value = "0.0", help = "Angle for CMY channel shifting (0=right, 90=down, etc.)")]
+    spread_angle: f32,
 }
 
 fn main() {
@@ -433,10 +441,10 @@ fn main() {
         }
         "posterize" => {
             println!(
-                "Processing {} with {} kernel (posterize mode, spread={}, gamma={:.2})...",
-                cli.input, cli.kernel, cli.spread_radius, gamma
+                "Processing {} with {} kernel (posterize mode, spread={}, offset={}, angle={:.1}°, gamma={:.2})...",
+                cli.input, cli.kernel, cli.spread_radius, cli.spread_offset, cli.spread_angle, gamma
             );
-            let posterized_cmy = posterize_cmy_spread(&img, cli.spread_radius);
+            let posterized_cmy = posterize_cmy_spread(&img, cli.spread_radius, cli.spread_offset, cli.spread_angle);
             let output = combine_cmy_with_dithered_k(&posterized_cmy, &img, &kernel, gamma);
             save_as_color_png(&output, &cli.output).unwrap_or_else(|e| {
                 eprintln!("Failed to save color PNG '{}': {}", cli.output, e);
