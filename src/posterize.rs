@@ -54,12 +54,19 @@ pub fn posterize_cmy_spread(
             let m = m_spread.get_pixel(x, y)[0] > 128;
             let y_cmy = y_spread.get_pixel(x, y)[0] > 128;
 
-            // Subtractive color mixing: start with white, subtract each channel
-            // C subtracts red, M subtracts green, Y subtracts blue
-            // Overlaps naturally create darker colors (R+G=Yellow, G+B=Cyan, R+B=Magenta, R+G+B=Black)
-            let r = if c { 0 } else { 255 };
-            let g = if m { 0 } else { 255 };
-            let b = if y_cmy { 0 } else { 255 };
+            // Use proper CMY RGB values with priority system: Yellow > Magenta > Cyan
+            // C: (0, 174, 239)
+            // M: (236, 0, 140)
+            // Y: (255, 242, 0)
+            let (r, g, b) = if y_cmy {
+                (255, 242, 0)  // Yellow has highest priority
+            } else if m {
+                (236, 0, 140)  // Magenta has second priority
+            } else if c {
+                (0, 174, 239)  // Cyan has lowest priority
+            } else {
+                (255, 255, 255)  // White if no channels active
+            };
 
             output.put_pixel(x, y, Rgb([r, g, b]));
         }
@@ -184,9 +191,12 @@ fn spread_channel(mask: &ImageBuffer<Rgb<u8>, Vec<u8>>, radius: u32) -> ImageBuf
     output
 }
 
-/// Combine posterized CMY with dithered K channel
+/// Combine posterized CMY with K channel using ordered dithering
 ///
-/// Where the dithered K is black, use K; where it's white, use the posterized CMY color
+/// Algorithm:
+/// 1. Extract K from original image
+/// 2. Compute target luminance from posterized CMY + K
+/// 3. Use ordered dither threshold to decide: output posterized CMY color or black
 pub fn combine_cmy_with_dithered_k(
     posterized_cmy: &ImageBuffer<Rgb<u8>, Vec<u8>>,
     img: &DynamicImage,
@@ -195,69 +205,38 @@ pub fn combine_cmy_with_dithered_k(
 ) -> ImageBuffer<Rgb<u8>, Vec<u8>> {
     let (width, height) = img.dimensions();
     let rgb_img = img.to_rgb8();
+    let mut output = ImageBuffer::new(width, height);
 
-    // Convert to perceptual grayscale with gamma correction
-    let mut gray = vec![0.0f64; (width * height) as usize];
     for y in 0..height {
         for x in 0..width {
+            // Get original pixel
             let pixel = rgb_img.get_pixel(x, y);
             let r = (pixel[0] as f64 / 255.0).powf(2.2);
             let g = (pixel[1] as f64 / 255.0).powf(2.2);
             let b = (pixel[2] as f64 / 255.0).powf(2.2);
 
-            // Perceptual luminance
+            // Compute original perceptual luminance
             let luminance = 0.2126 * r + 0.7152 * g + 0.0722 * b;
 
             // Apply gamma correction
-            let adjusted = luminance.powf(gamma as f64);
+            let adjusted_luminance = luminance.powf(gamma as f64);
 
-            gray[(y * width + x) as usize] = adjusted;
-        }
-    }
+            // Get posterized CMY color for this pixel
+            let cmy_color = posterized_cmy.get_pixel(x, y);
 
-    // Apply error diffusion dithering and combine with posterized CMY
-    let mut output = ImageBuffer::new(width, height);
-
-    for y in 0..height {
-        for x in 0..width {
-            let idx = (y * width + x) as usize;
-            let old_val = gray[idx];
-
-            // Get threshold from kernel
+            // Get threshold from ordered dither kernel
             let threshold = kernel.get(
                 (x as usize) % kernel.width,
                 (y as usize) % kernel.height,
             );
 
-            // Threshold the pixel
-            let new_val = if old_val > threshold { 1.0 } else { 0.0 };
-            let error = old_val - new_val;
-
-            // Screen blend: 1 - (1 - dithered) * (1 - cmy)
-            // This prevents colors from getting too dark while preserving K
-            let cmy_color = posterized_cmy.get_pixel(x, y);
-            let cmy_r = cmy_color[0] as f64 / 255.0;
-            let cmy_g = cmy_color[1] as f64 / 255.0;
-            let cmy_b = cmy_color[2] as f64 / 255.0;
-
-            let r = (1.0 - (1.0 - new_val) * (1.0 - cmy_r)) * 255.0;
-            let g = (1.0 - (1.0 - new_val) * (1.0 - cmy_g)) * 255.0;
-            let b = (1.0 - (1.0 - new_val) * (1.0 - cmy_b)) * 255.0;
-
-            output.put_pixel(x, y, Rgb([r as u8, g as u8, b as u8]));
-
-            // Distribute error using Floyd-Steinberg weights
-            if x + 1 < width {
-                gray[(y * width + x + 1) as usize] += error * 7.0 / 16.0;
-            }
-            if y + 1 < height {
-                if x > 0 {
-                    gray[((y + 1) * width + x - 1) as usize] += error * 3.0 / 16.0;
-                }
-                gray[((y + 1) * width + x) as usize] += error * 5.0 / 16.0;
-                if x + 1 < width {
-                    gray[((y + 1) * width + x + 1) as usize] += error * 1.0 / 16.0;
-                }
+            // Binary decision: if luminance > threshold, show posterized CMY color (or white), else black
+            if adjusted_luminance > threshold {
+                // Pixel is "on" - output the posterized CMY color
+                output.put_pixel(x, y, *cmy_color);
+            } else {
+                // Pixel is "off" - output black
+                output.put_pixel(x, y, Rgb([0, 0, 0]));
             }
         }
     }
