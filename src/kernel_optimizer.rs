@@ -79,9 +79,6 @@ impl IncrementalScorer {
             } else if dr == dc {
                 // Diagonal alignment - bad
                 ALIGNMENT_PENALTY_DIAGONAL * combined_weight
-            } else if distance_sq as i32 <= PROXIMITY_THRESHOLD_SQ && sequence_distance <= SEQUENTIAL_THRESHOLD {
-                // Close together but not on line/diagonal (catches knight moves, etc.) - moderately bad
-                MISALIGNED_PROXIMITY_PENALTY * combined_weight
             } else {
                 0.0
             };
@@ -160,13 +157,8 @@ impl IncrementalScorer {
 }
 
 // Scoring constants
-const ALIGNMENT_PENALTY: f32 = 5.0; // Overall alignment penalty strength
-const DIAGONAL_REJECTION: f32 = 1.5;
-const ALIGNMENT_PENALTY_SAME_LINE: f32 = -ALIGNMENT_PENALTY; // Penalty for being in same row/column
-const ALIGNMENT_PENALTY_DIAGONAL: f32 = DIAGONAL_REJECTION * 0.7071 * ALIGNMENT_PENALTY_SAME_LINE; // Penalty for being on a diagonal
-const MISALIGNED_PROXIMITY_PENALTY: f32 = -3.0; // Penalty for being close but not on line/diagonal
-const PROXIMITY_THRESHOLD_SQ: i32 = 20; // Distance squared threshold for "too close" (catches knight moves)
-const SEQUENTIAL_THRESHOLD: f32 = 15.0; // Sequence distance threshold for "too sequential"
+const ALIGNMENT_PENALTY_SAME_LINE: f32 = -1.0; // Penalty for being in same row/column
+const ALIGNMENT_PENALTY_DIAGONAL: f32 = -2.0; // Penalty for being on a diagonal
 
 /// Calculate toroidal (wrapped) distance component between two coordinates
 #[inline]
@@ -259,9 +251,6 @@ impl Kernel {
                 } else if dr == dc {
                     // Diagonal alignment - bad
                     ALIGNMENT_PENALTY_DIAGONAL * combined_weight
-                } else if distance_sq <= PROXIMITY_THRESHOLD_SQ as f32 && sequence_distance <= SEQUENTIAL_THRESHOLD {
-                    // Close together but not on line/diagonal (catches knight moves, etc.) - moderately bad
-                    MISALIGNED_PROXIMITY_PENALTY * combined_weight
                 } else {
                     0.0
                 };
