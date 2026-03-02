@@ -14,7 +14,7 @@ use filters::{
     save_as_1bit_png, save_as_color_png,
     ThresholdKernel,
 };
-use posterize::{posterize_cmy_spread, combine_cmy_with_dithered_k};
+use posterize::{posterize_rgb_spread, combine_rgb_with_dithered_k};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 #[derive(Parser)]
@@ -444,8 +444,8 @@ fn main() {
                 "Processing {} with {} kernel (posterize mode, spread={}, offset={}, angle={:.1}°, gamma={:.2})...",
                 cli.input, cli.kernel, cli.spread_radius, cli.spread_offset, cli.spread_angle, gamma
             );
-            let posterized_cmy = posterize_cmy_spread(&img, cli.spread_radius, cli.spread_offset, cli.spread_angle);
-            let output = combine_cmy_with_dithered_k(&posterized_cmy, &img, &kernel, gamma);
+            let posterized_rgb = posterize_rgb_spread(&img, cli.spread_radius, cli.spread_offset, cli.spread_angle);
+            let output = combine_rgb_with_dithered_k(&posterized_rgb, &img, &kernel, gamma);
             save_as_color_png(&output, &cli.output).unwrap_or_else(|e| {
                 eprintln!("Failed to save color PNG '{}': {}", cli.output, e);
                 std::process::exit(1);

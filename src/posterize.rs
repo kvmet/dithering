@@ -10,7 +10,7 @@ use crate::filters::ThresholdKernel;
 ///
 /// This creates a posterized effect with bloomed color areas.
 /// Dithering happens separately when this is combined with the K channel.
-pub fn posterize_cmy_spread(
+pub fn posterize_rgb_spread(
     img: &DynamicImage,
     spread_radius: u32,
     spread_offset: i32,
@@ -18,55 +18,77 @@ pub fn posterize_cmy_spread(
 ) -> ImageBuffer<Rgb<u8>, Vec<u8>> {
     let (width, height) = img.dimensions();
 
-    // Step 1: Extract C, M, Y channels as separate boolean masks
-    let (c_mask, m_mask, y_mask) = extract_cmy_channels(img);
+    // Step 1: Extract R, G, B channels as separate boolean masks
+    let (r_mask, g_mask, b_mask) = extract_rgb_channels(img);
 
     // Step 2: Shift each channel by offset in different directions (120° apart)
-    let c_shifted = if spread_offset > 0 {
-        shift_channel(&c_mask, spread_offset, spread_angle)
+    let r_shifted = if spread_offset > 0 {
+        shift_channel(&r_mask, spread_offset, spread_angle)
     } else {
-        c_mask.clone()
+        r_mask.clone()
     };
 
-    let m_shifted = if spread_offset > 0 {
-        shift_channel(&m_mask, spread_offset, spread_angle + 120.0)
+    let g_shifted = if spread_offset > 0 {
+        shift_channel(&g_mask, spread_offset, spread_angle + 120.0)
     } else {
-        m_mask.clone()
+        g_mask.clone()
     };
 
-    let y_shifted = if spread_offset > 0 {
-        shift_channel(&y_mask, spread_offset, spread_angle + 240.0)
+    let b_shifted = if spread_offset > 0 {
+        shift_channel(&b_mask, spread_offset, spread_angle + 240.0)
     } else {
-        y_mask.clone()
+        b_mask.clone()
     };
 
     // Step 3: Spread each shifted channel independently
-    let c_spread = spread_channel(&c_shifted, spread_radius);
-    let m_spread = spread_channel(&m_shifted, spread_radius);
-    let y_spread = spread_channel(&y_shifted, spread_radius);
+    let r_spread = spread_channel(&r_shifted, spread_radius);
+    let g_spread = spread_channel(&g_shifted, spread_radius);
+    let b_spread = spread_channel(&b_shifted, spread_radius);
 
-    // Step 4: Recombine CMY back to RGB
+    // Step 4: Recombine RGB with reflect blending
     let mut output = ImageBuffer::new(width, height);
 
     for y in 0..height {
         for x in 0..width {
-            let c = c_spread.get_pixel(x, y)[0] > 128;
-            let m = m_spread.get_pixel(x, y)[0] > 128;
-            let y_cmy = y_spread.get_pixel(x, y)[0] > 128;
+            let r_on = r_spread.get_pixel(x, y)[0] > 128;
+            let g_on = g_spread.get_pixel(x, y)[0] > 128;
+            let b_on = b_spread.get_pixel(x, y)[0] > 128;
 
-            // Use proper CMY RGB values with priority system: Yellow > Magenta > Cyan
-            // C: (0, 174, 239)
-            // M: (236, 0, 140)
-            // Y: (255, 242, 0)
-            let (r, g, b) = if y_cmy {
-                (255, 242, 0)  // Yellow has highest priority
-            } else if m {
-                (236, 0, 140)  // Magenta has second priority
-            } else if c {
-                (0, 174, 239)  // Cyan has lowest priority
-            } else {
-                (255, 255, 255)  // White if no channels active
-            };
+            // Screen blend: 1 - (1 - a) * (1 - b)
+            // Start with black (0, 0, 0) and screen blend each active channel
+            let mut result_r = 0.0f32;
+            let mut result_g = 0.0f32;
+            let mut result_b = 0.0f32;
+
+            if r_on {
+                // Blend in pure red (1, 0, 0)
+                result_r = 1.0 - (1.0 - result_r) * (1.0 - 1.0);
+                result_g = 1.0 - (1.0 - result_g) * (1.0 - 0.0);
+                result_b = 1.0 - (1.0 - result_b) * (1.0 - 0.0);
+            }
+            if g_on {
+                // Blend in pure green (0, 1, 0)
+                result_r = 1.0 - (1.0 - result_r) * (1.0 - 0.0);
+                result_g = 1.0 - (1.0 - result_g) * (1.0 - 1.0);
+                result_b = 1.0 - (1.0 - result_b) * (1.0 - 0.0);
+            }
+            if b_on {
+                // Blend in pure blue (0, 0, 1)
+                result_r = 1.0 - (1.0 - result_r) * (1.0 - 0.0);
+                result_g = 1.0 - (1.0 - result_g) * (1.0 - 0.0);
+                result_b = 1.0 - (1.0 - result_b) * (1.0 - 1.0);
+            }
+
+            // If no channels are active, make it white instead of black
+            if !r_on && !g_on && !b_on {
+                result_r = 1.0;
+                result_g = 1.0;
+                result_b = 1.0;
+            }
+
+            let r = (result_r * 255.0) as u8;
+            let g = (result_g * 255.0) as u8;
+            let b = (result_b * 255.0) as u8;
 
             output.put_pixel(x, y, Rgb([r, g, b]));
         }
@@ -75,13 +97,13 @@ pub fn posterize_cmy_spread(
     output
 }
 
-/// Extract C, M, Y channels as separate boolean masks
-/// Returns (C_mask, M_mask, Y_mask) where 255 = channel is on, 0 = channel is off
-fn extract_cmy_channels(img: &DynamicImage) -> (ImageBuffer<Rgb<u8>, Vec<u8>>, ImageBuffer<Rgb<u8>, Vec<u8>>, ImageBuffer<Rgb<u8>, Vec<u8>>) {
+/// Extract R, G, B channels as separate boolean masks
+/// Returns (R_mask, G_mask, B_mask) where 255 = channel is on, 0 = channel is off
+fn extract_rgb_channels(img: &DynamicImage) -> (ImageBuffer<Rgb<u8>, Vec<u8>>, ImageBuffer<Rgb<u8>, Vec<u8>>, ImageBuffer<Rgb<u8>, Vec<u8>>) {
     let (width, height) = img.dimensions();
-    let mut c_mask = ImageBuffer::new(width, height);
-    let mut m_mask = ImageBuffer::new(width, height);
-    let mut y_mask = ImageBuffer::new(width, height);
+    let mut r_mask = ImageBuffer::new(width, height);
+    let mut g_mask = ImageBuffer::new(width, height);
+    let mut b_mask = ImageBuffer::new(width, height);
 
     for y in 0..height {
         for x in 0..width {
@@ -90,31 +112,18 @@ fn extract_cmy_channels(img: &DynamicImage) -> (ImageBuffer<Rgb<u8>, Vec<u8>>, I
             let g = pixel[1] as f32 / 255.0;
             let b = pixel[2] as f32 / 255.0;
 
-            // Convert to CMY
-            let c = 1.0 - r;
-            let m = 1.0 - g;
-            let y_cmy = 1.0 - b;
-
-            // Find K (black) component
-            let k = c.min(m).min(y_cmy);
-
-            // Remove K component from CMY to get pure color components
-            let c_adj = if k < 1.0 { (c - k) / (1.0 - k) } else { 0.0 };
-            let m_adj = if k < 1.0 { (m - k) / (1.0 - k) } else { 0.0 };
-            let y_adj = if k < 1.0 { (y_cmy - k) / (1.0 - k) } else { 0.0 };
-
             // Threshold each channel independently (>0.5 = on)
-            let c_on = if c_adj > 0.5 { 255 } else { 0 };
-            let m_on = if m_adj > 0.5 { 255 } else { 0 };
-            let y_on = if y_adj > 0.5 { 255 } else { 0 };
+            let r_on = if r > 0.5 { 255 } else { 0 };
+            let g_on = if g > 0.5 { 255 } else { 0 };
+            let b_on = if b > 0.5 { 255 } else { 0 };
 
-            c_mask.put_pixel(x, y, Rgb([c_on, c_on, c_on]));
-            m_mask.put_pixel(x, y, Rgb([m_on, m_on, m_on]));
-            y_mask.put_pixel(x, y, Rgb([y_on, y_on, y_on]));
+            r_mask.put_pixel(x, y, Rgb([r_on, r_on, r_on]));
+            g_mask.put_pixel(x, y, Rgb([g_on, g_on, g_on]));
+            b_mask.put_pixel(x, y, Rgb([b_on, b_on, b_on]));
         }
     }
 
-    (c_mask, m_mask, y_mask)
+    (r_mask, g_mask, b_mask)
 }
 
 /// Shift a channel mask by an offset in a given direction
@@ -191,14 +200,13 @@ fn spread_channel(mask: &ImageBuffer<Rgb<u8>, Vec<u8>>, radius: u32) -> ImageBuf
     output
 }
 
-/// Combine posterized CMY with K channel using ordered dithering
+/// Combine posterized RGB with K channel using ordered dithering
 ///
 /// Algorithm:
-/// 1. Extract K from original image
-/// 2. Compute target luminance from posterized CMY + K
-/// 3. Use ordered dither threshold to decide: output posterized CMY color or black
-pub fn combine_cmy_with_dithered_k(
-    posterized_cmy: &ImageBuffer<Rgb<u8>, Vec<u8>>,
+/// 1. Compute luminance from original image
+/// 2. Use ordered dither threshold to decide: output posterized RGB color or black
+pub fn combine_rgb_with_dithered_k(
+    posterized_rgb: &ImageBuffer<Rgb<u8>, Vec<u8>>,
     img: &DynamicImage,
     kernel: &ThresholdKernel,
     gamma: f32,
@@ -221,8 +229,8 @@ pub fn combine_cmy_with_dithered_k(
             // Apply gamma correction
             let adjusted_luminance = luminance.powf(gamma as f64);
 
-            // Get posterized CMY color for this pixel
-            let cmy_color = posterized_cmy.get_pixel(x, y);
+            // Get posterized RGB color for this pixel
+            let rgb_color = posterized_rgb.get_pixel(x, y);
 
             // Get threshold from ordered dither kernel
             let threshold = kernel.get(
@@ -230,10 +238,10 @@ pub fn combine_cmy_with_dithered_k(
                 (y as usize) % kernel.height,
             );
 
-            // Binary decision: if luminance > threshold, show posterized CMY color (or white), else black
+            // Binary decision: if luminance > threshold, show posterized RGB color (or white), else black
             if adjusted_luminance > threshold {
-                // Pixel is "on" - output the posterized CMY color
-                output.put_pixel(x, y, *cmy_color);
+                // Pixel is "on" - output the posterized RGB color
+                output.put_pixel(x, y, *rgb_color);
             } else {
                 // Pixel is "off" - output black
                 output.put_pixel(x, y, Rgb([0, 0, 0]));
