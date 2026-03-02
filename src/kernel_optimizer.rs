@@ -397,14 +397,17 @@ pub fn optimize_kernel(
         current.swap(i, j);
     }
 
-    let mut current_kernel = Kernel::new(size, current.clone());
-    let positions = current_kernel.build_positions();
+    // Build initial positions and scorer
+    let positions = {
+        let kernel = Kernel::new(size, current.clone());
+        kernel.build_positions()
+    };
 
     // Initialize incremental scorer
     let mut scorer = IncrementalScorer::new(size, positions);
     let mut current_score = scorer.total_score();
 
-    let mut best_kernel = current_kernel.clone();
+    let mut best_kernel = Kernel::new(size, current.clone());
     let mut best_score = current_score;
 
     let mut temperature = initial_temp;
@@ -494,12 +497,11 @@ pub fn optimize_kernel(
         if delta > 0.0 || random_val < (delta as f64 / temperature).exp() {
             // Accept the swap
             current_score = new_score;
-            current_kernel = Kernel::new(size, current.clone());
             accepts += 1;
 
             if current_score > best_score {
                 best_score = current_score;
-                best_kernel = current_kernel.clone();
+                best_kernel = Kernel::new(size, current.clone());
             }
         } else {
             // Reject: swap back both current and scorer
