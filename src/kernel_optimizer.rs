@@ -108,11 +108,8 @@ impl ScoreLookup {
 
     #[inline]
     fn get(&self, val_i: usize, val_j: usize, pos_i: usize, pos_j: usize) -> f64 {
-        if val_i == val_j {
-            return 0.0;
-        }
-
         // Get base geometry-weighted distance score (unchecked for speed)
+        // Note: when pos_i == pos_j, table entry is 0.0, so result is correctly 0.0
         let idx = pos_i * self.n + pos_j;
         // SAFETY: pos_i and pos_j are derived from positions array which has length n,
         // so idx = pos_i * n + pos_j is always < n * n = table.len()
