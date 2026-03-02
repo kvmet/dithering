@@ -37,7 +37,9 @@ pub struct ScoreLookup {
     table: Vec<f32>,
     n: usize, // grid size (total number of values/positions)
     size: usize, // grid width/height
-    sequence_weight_strength: f32, // 0.0 = no sequence weight, 1.0 = full 1/distance weight
+    // Precomputed weights for fast lookup
+    sequence_weights: Vec<f32>, // [value_distance] -> weight
+    position_weights: Vec<f32>, // [smaller_val] -> weight
 }
 
 impl ScoreLookup {
@@ -49,6 +51,21 @@ impl ScoreLookup {
         let n = size * size;
         let table_size = n * n;
         let mut table = vec![0.0; table_size];
+
+        // Precompute sequence weights for all possible value distances
+        let mut sequence_weights = vec![NO_SEQUENCE_PENALTY; n];
+        if sequence_weight_strength > 0.0 {
+            for value_distance in 1..n {
+                let raw_weight = 1.0 / value_distance as f32;
+                sequence_weights[value_distance] = NO_SEQUENCE_PENALTY + sequence_weight_strength * (raw_weight - NO_SEQUENCE_PENALTY);
+            }
+        }
+
+        // Precompute position weights for all possible smaller values
+        let mut position_weights = vec![1.0; n];
+        for smaller_val in 0..n {
+            position_weights[smaller_val] = 1.0 / (smaller_val + 1) as f32;
+        }
 
         // Precompute geometry_weight * distance_sq for all position pairs
         for pos_i in 0..n {
@@ -86,7 +103,7 @@ impl ScoreLookup {
             }
         }
 
-        ScoreLookup { table, n, size, sequence_weight_strength }
+        ScoreLookup { table, n, size, sequence_weights, position_weights }
     }
 
     #[inline]
@@ -95,23 +112,16 @@ impl ScoreLookup {
             return 0.0;
         }
 
-        // Get base geometry-weighted distance score
+        // Get base geometry-weighted distance score (unchecked for speed)
         let idx = pos_i * self.n + pos_j;
-        let base_score = self.table[idx];
+        let base_score = unsafe { *self.table.get_unchecked(idx) };
 
-        // Apply value-dependent weights
+        // Apply precomputed value-dependent weights
         let value_distance = if val_i > val_j { val_i - val_j } else { val_j - val_i };
-
-        // Sequence weight: interpolate between NO_SEQUENCE_PENALTY and 1/distance (full penalty)
-        let sequence_weight = if self.sequence_weight_strength > 0.0 {
-            let raw_weight = 1.0 / value_distance as f32;
-            NO_SEQUENCE_PENALTY + self.sequence_weight_strength * (raw_weight - NO_SEQUENCE_PENALTY)
-        } else {
-            NO_SEQUENCE_PENALTY
-        };
+        let sequence_weight = unsafe { *self.sequence_weights.get_unchecked(value_distance) };
 
         let smaller_val = val_i.min(val_j);
-        let position_weight = 1.0 / (smaller_val + 1) as f32;
+        let position_weight = unsafe { *self.position_weights.get_unchecked(smaller_val) };
 
         base_score * sequence_weight * position_weight
     }
@@ -387,10 +397,8 @@ pub fn optimize_kernel(
 
         for _ in 0..calibration_samples {
             let i = (random() as usize) % current.len();
-            let mut j = (random() as usize) % current.len();
-            while i == j {
-                j = (random() as usize) % current.len();
-            }
+            let j = (random() as usize) % (current.len() - 1);
+            let j = if j >= i { j + 1 } else { j };
 
             let val1 = current[i] as usize - 1;
             let val2 = current[j] as usize - 1;
