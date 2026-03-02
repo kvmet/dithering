@@ -87,6 +87,14 @@ struct Cli {
     /// Print score table and exit (use with -k to specify kernel)
     #[arg(long, help = "Print score table and exit")]
     print_scores: bool,
+
+    /// Target width (scales height proportionally if height not specified)
+    #[arg(short = 'W', long, value_name = "PIXELS", help = "Target width in pixels")]
+    width: Option<u32>,
+
+    /// Target height (scales width proportionally if width not specified)
+    #[arg(short = 'H', long, value_name = "PIXELS", help = "Target height in pixels")]
+    height: Option<u32>,
 }
 
 fn main() {
@@ -113,10 +121,37 @@ fn main() {
     }
 
     // Load the image
-    let img = image::open(&cli.input).unwrap_or_else(|e| {
+    let mut img = image::open(&cli.input).unwrap_or_else(|e| {
         eprintln!("Failed to open image '{}': {}", cli.input, e);
         std::process::exit(1);
     });
+
+    // Resize image if width/height specified
+    if cli.width.is_some() || cli.height.is_some() {
+        let (orig_w, orig_h) = (img.width(), img.height());
+        let (target_w, target_h) = match (cli.width, cli.height) {
+            (Some(w), Some(h)) => {
+                // Both specified: stretch to exact dimensions
+                (w, h)
+            }
+            (Some(w), None) => {
+                // Only width: maintain aspect ratio
+                let h = ((w as f64 / orig_w as f64) * orig_h as f64).round() as u32;
+                (w, h)
+            }
+            (None, Some(h)) => {
+                // Only height: maintain aspect ratio
+                let w = ((h as f64 / orig_h as f64) * orig_w as f64).round() as u32;
+                (w, h)
+            }
+            (None, None) => unreachable!(),
+        };
+
+        if target_w != orig_w || target_h != orig_h {
+            println!("Resizing from {}x{} to {}x{}", orig_w, orig_h, target_w, target_h);
+            img = img.resize_exact(target_w, target_h, image::imageops::FilterType::Lanczos3);
+        }
+    }
 
     // Parse kernel
     let kernel = if cli.kernel.contains(':') {
