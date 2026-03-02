@@ -243,7 +243,7 @@ const HORIZONTAL_WEIGHT: f32 = 0.1;          // Weight for horizontal (same row)
 const POSITIVE_DIAGONAL_WEIGHT: f32 = 0.144;   // Weight for positive diagonal (slope = 1) - LESS BAD
 const NEGATIVE_DIAGONAL_WEIGHT: f32 = 0.144;   // Weight for negative diagonal (slope = -1) - LESS BAD
 const KNIGHT_WEIGHT: f32 = 0.5;              // Weight for knight move patterns (2,1 or 1,2) - MEDIUM
-const OTHER_WEIGHT: f32 = 1.0;               // Weight for all other geometric relationships - GOOD
+const OTHER_WEIGHT: f32 = 10.0;               // Weight for all other geometric relationships - GOOD
 
 /// Calculate toroidal (wrapped) distance component between two coordinates
 #[inline]
@@ -278,7 +278,13 @@ impl Kernel {
         for row in 0..self.size {
             for col in 0..self.size {
                 let value = self.get(row, col);
-                let index = (value as usize) - 1;
+                // Handle both discrete (1-based) and continuous (0.0-1.0) values
+                let index = if value >= 1.0 {
+                    ((value as usize).saturating_sub(1)).min(self.grid.len() - 1)
+                } else {
+                    // Continuous value: map to 0..n
+                    ((value * self.grid.len() as f32) as usize).min(self.grid.len() - 1)
+                };
                 positions[index] = (row, col);
             }
         }
@@ -301,45 +307,21 @@ impl Kernel {
     /// Calculate score using pre-built position map
     /// This is more efficient when positions are already known
     fn score_with_positions(&self, positions: &[(usize, usize)]) -> f32 {
+        // Use the static lookup table for efficient scoring
+        let lookup = ScoreLookup::new(self.size);
         let mut total_score = 0.0;
 
-        // Calculate pairwise distances with weighting
         for i in 0..positions.len() {
             for j in (i + 1)..positions.len() {
                 let (r1, c1) = positions[i];
                 let (r2, c2) = positions[j];
+                let pos_i = r1 * self.size + c1;
+                let pos_j = r2 * self.size + c2;
 
-                // Calculate wrapped distance squared (toroidal)
-                let dr = toroidal_distance_component(r1, r2, self.size);
-                let dc = toroidal_distance_component(c1, c2, self.size);
+                // Value distance
+                let value_distance = j - i;
 
-                let distance_sq = (dr * dr + dc * dc) as f32;
-
-                // Weight by sequence distance (closer in sequence = more important)
-                let sequence_distance = (j - i) as f32;
-                let sequence_weight = 1.0 / sequence_distance;
-
-                // Weight by position (early transitions more visible than late)
-                // Using i+1 to avoid division issues and because value indices are 0-based
-                let position_weight = 1.0 / ((i + 1) as f32).sqrt();
-
-                let combined_weight = sequence_weight * position_weight;
-
-                // Distance contribution weighted by combined weight
-                let weighted_distance = distance_sq * combined_weight;
-
-                // Classify by geometric relationship and add to total with appropriate weight
-                if c1 == c2 {
-                    total_score += VERTICAL_WEIGHT * weighted_distance;
-                } else if r1 == r2 {
-                    total_score += HORIZONTAL_WEIGHT * weighted_distance;
-                } else if dr == dc {
-                    total_score += POSITIVE_DIAGONAL_WEIGHT * weighted_distance;
-                } else if dr == -dc {
-                    total_score += NEGATIVE_DIAGONAL_WEIGHT * weighted_distance;
-                } else {
-                    total_score += OTHER_WEIGHT * weighted_distance;
-                }
+                total_score += lookup.get(i, j, pos_i, pos_j);
             }
         }
 
