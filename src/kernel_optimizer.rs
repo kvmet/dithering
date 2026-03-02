@@ -7,12 +7,12 @@ use std::time::Instant;
 // Scoring weights for each geometric bucket
 // Lower weight = penalize this geometry (we don't want distance here)
 // Higher weight = reward this geometry (we want distance here)
-const VERTICAL_WEIGHT: f32 = 0.2;            // Weight for vertical (same column) alignments - BAD
-const HORIZONTAL_WEIGHT: f32 = 0.2;          // Weight for horizontal (same row) alignments - BAD
-const POSITIVE_DIAGONAL_WEIGHT: f32 = 0.3;   // Weight for positive diagonal (slope = 1) - LESS BAD
-const NEGATIVE_DIAGONAL_WEIGHT: f32 = 0.3;   // Weight for negative diagonal (slope = -1) - LESS BAD
-const KNIGHT_WEIGHT: f32 = 0.5;              // Weight for knight move patterns (2,1 or 1,2) - MEDIUM
-const OTHER_WEIGHT: f32 = 1.0;               // Weight for all other geometric relationships - GOOD
+const VERTICAL_WEIGHT: f64 = 0.2;            // Weight for vertical (same column) alignments - BAD
+const HORIZONTAL_WEIGHT: f64 = 0.2;          // Weight for horizontal (same row) alignments - BAD
+const POSITIVE_DIAGONAL_WEIGHT: f64 = 0.3;   // Weight for positive diagonal (slope = 1) - LESS BAD
+const NEGATIVE_DIAGONAL_WEIGHT: f64 = 0.3;   // Weight for negative diagonal (slope = -1) - LESS BAD
+const KNIGHT_WEIGHT: f64 = 0.5;              // Weight for knight move patterns (2,1 or 1,2) - MEDIUM
+const OTHER_WEIGHT: f64 = 1.0;               // Weight for all other geometric relationships - GOOD
 
 // Linear Congruential Generator (LCG) constants
 const LCG_MULTIPLIER: u64 = 1664525;
@@ -20,26 +20,26 @@ const LCG_INCREMENT: u64 = 1013904223;
 
 // Annealing calibration constants
 const CALIBRATION_SAMPLES: usize = 1000;
-const CALIBRATION_TEMP_MULTIPLIER: f32 = 2.0; // initial_temp = avg_delta * this
+const CALIBRATION_TEMP_MULTIPLIER: f64 = 2.0; // initial_temp = avg_delta * this
 const TARGET_FINAL_TEMP_RATIO: f64 = 0.01; // Cool to 1% of initial temp
 
 // Annealing reporting
 const REPORT_INTERVAL: usize = 1_000_000;
 
 // Sequence weight interpolation
-const NO_SEQUENCE_PENALTY: f32 = 1.0; // Weight when sequence_weight_strength = 0
+const NO_SEQUENCE_PENALTY: f64 = 1.0; // Weight when sequence_weight_strength = 0
 
 /// Static score lookup table precomputed once for all possible position pairs
 /// Stores only geometry_weight * distance_sq (independent of value assignments)
 /// Position and sequence weights are applied at lookup time
 pub struct ScoreLookup {
     // Flattened 2D array: [pos_i * n + pos_j]
-    table: Vec<f32>,
+    table: Vec<f64>,
     n: usize, // grid size (total number of values/positions)
     size: usize, // grid width/height
     // Precomputed weights for fast lookup
-    sequence_weights: Vec<f32>, // [value_distance] -> weight
-    position_weights: Vec<f32>, // [smaller_val] -> weight
+    sequence_weights: Vec<f64>, // [value_distance] -> weight
+    position_weights: Vec<f64>, // [smaller_val] -> weight
 }
 
 impl ScoreLookup {
@@ -47,7 +47,7 @@ impl ScoreLookup {
         Self::new_with_sequence_weight(size, 1.0)
     }
 
-    pub fn new_with_sequence_weight(size: usize, sequence_weight_strength: f32) -> Self {
+    pub fn new_with_sequence_weight(size: usize, sequence_weight_strength: f64) -> Self {
         let n = size * size;
         let table_size = n * n;
         let mut table = vec![0.0; table_size];
@@ -56,7 +56,7 @@ impl ScoreLookup {
         let mut sequence_weights = vec![NO_SEQUENCE_PENALTY; n];
         if sequence_weight_strength > 0.0 {
             for value_distance in 1..n {
-                let raw_weight = 1.0 / value_distance as f32;
+                let raw_weight = 1.0 / value_distance as f64;
                 sequence_weights[value_distance] = NO_SEQUENCE_PENALTY + sequence_weight_strength * (raw_weight - NO_SEQUENCE_PENALTY);
             }
         }
@@ -64,7 +64,7 @@ impl ScoreLookup {
         // Precompute position weights for all possible smaller values
         let mut position_weights = vec![1.0; n];
         for smaller_val in 0..n {
-            position_weights[smaller_val] = 1.0 / (smaller_val + 1) as f32;
+            position_weights[smaller_val] = 1.0 / (smaller_val + 1) as f64;
         }
 
         // Precompute geometry_weight * distance_sq for all position pairs
@@ -80,14 +80,14 @@ impl ScoreLookup {
 
                 let dr = toroidal_distance_component(r1, r2, size);
                 let dc = toroidal_distance_component(c1, c2, size);
-                let distance_sq = (dr * dr + dc * dc) as f32;
+                let distance_sq = (dr * dr + dc * dc) as f64;
 
                 // Branchless geometry weight selection
-                let is_vertical = (c1 == c2) as i32 as f32;
-                let is_horizontal = (r1 == r2) as i32 as f32;
-                let is_pos_diagonal = (dr == dc) as i32 as f32;
-                let is_neg_diagonal = (dr == -dc) as i32 as f32;
-                let is_knight = ((dr * dr + dc * dc) == 5) as i32 as f32;
+                let is_vertical = (c1 == c2) as i32 as f64;
+                let is_horizontal = (r1 == r2) as i32 as f64;
+                let is_pos_diagonal = (dr == dc) as i32 as f64;
+                let is_neg_diagonal = (dr == -dc) as i32 as f64;
+                let is_knight = ((dr * dr + dc * dc) == 5) as i32 as f64;
 
                 let geometry_weight = is_vertical * VERTICAL_WEIGHT
                     + is_horizontal * HORIZONTAL_WEIGHT
@@ -107,20 +107,26 @@ impl ScoreLookup {
     }
 
     #[inline]
-    fn get(&self, val_i: usize, val_j: usize, pos_i: usize, pos_j: usize) -> f32 {
+    fn get(&self, val_i: usize, val_j: usize, pos_i: usize, pos_j: usize) -> f64 {
         if val_i == val_j {
             return 0.0;
         }
 
         // Get base geometry-weighted distance score (unchecked for speed)
         let idx = pos_i * self.n + pos_j;
+        // SAFETY: pos_i and pos_j are derived from positions array which has length n,
+        // so idx = pos_i * n + pos_j is always < n * n = table.len()
         let base_score = unsafe { *self.table.get_unchecked(idx) };
 
         // Apply precomputed value-dependent weights
         let value_distance = if val_i > val_j { val_i - val_j } else { val_j - val_i };
+        // SAFETY: value_distance is the absolute difference of two indices < n,
+        // so value_distance < n = sequence_weights.len()
         let sequence_weight = unsafe { *self.sequence_weights.get_unchecked(value_distance) };
 
         let smaller_val = val_i.min(val_j);
+        // SAFETY: smaller_val is min of two value indices < n,
+        // so smaller_val < n = position_weights.len()
         let position_weight = unsafe { *self.position_weights.get_unchecked(smaller_val) };
 
         base_score * sequence_weight * position_weight
@@ -176,10 +182,10 @@ pub struct IncrementalScorer {
     lookup: ScoreLookup,
 
     // Current total score with weights applied
-    total_score: f32,
+    total_score: f64,
 
     // Store old score for efficient undo
-    old_score: f32,
+    old_score: f64,
 }
 
 impl IncrementalScorer {
@@ -188,12 +194,12 @@ impl IncrementalScorer {
         Self::new_with_sequence_weight(size, positions, 1.0)
     }
 
-    pub fn new_with_sequence_weight(size: usize, positions: Vec<(usize, usize)>, sequence_weight_strength: f32) -> Self {
+    pub fn new_with_sequence_weight(size: usize, positions: Vec<(usize, usize)>, sequence_weight_strength: f64) -> Self {
         println!("Building static score lookup table (sequence_weight_strength={:.2})...", sequence_weight_strength);
         let lookup = ScoreLookup::new_with_sequence_weight(size, sequence_weight_strength);
         println!("Lookup table built: {} entries ({:.2} MB)",
                  lookup.table.len(),
-                 (lookup.table.len() * std::mem::size_of::<f32>()) as f64 / 1024.0 / 1024.0);
+                 (lookup.table.len() * std::mem::size_of::<f64>()) as f64 / 1024.0 / 1024.0);
 
         let mut scorer = IncrementalScorer {
             size,
@@ -211,13 +217,13 @@ impl IncrementalScorer {
 
     /// Get total score
     #[inline]
-    pub fn total_score(&self) -> f32 {
+    pub fn total_score(&self) -> f64 {
         self.total_score
     }
 
     /// Get score for a pair from the lookup table
     #[inline]
-    fn get_pair_score(&self, val_idx1: usize, val_idx2: usize) -> f32 {
+    fn get_pair_score(&self, val_idx1: usize, val_idx2: usize) -> f64 {
         let (r1, c1) = self.positions[val_idx1];
         let (r2, c2) = self.positions[val_idx2];
         let pos_i = r1 * self.size + c1;
@@ -226,7 +232,7 @@ impl IncrementalScorer {
     }
 
     /// Calculate full score from lookup table
-    fn calculate_full_score(&self) -> f32 {
+    fn calculate_full_score(&self) -> f64 {
         let mut total = 0.0;
         let n = self.positions.len();
 
@@ -312,21 +318,29 @@ impl Kernel {
     }
 
     /// Build position map: value -> (row, col)
+    /// Values must be integers in range [1, n] where n = grid.len()
     pub fn build_positions(&self) -> Vec<(usize, usize)> {
-        let mut positions = vec![(0, 0); self.grid.len()];
+        let n = self.grid.len();
+        let mut positions = vec![(0, 0); n];
+        let mut seen = vec![false; n];
+
         for row in 0..self.size {
             for col in 0..self.size {
                 let value = self.get(row, col);
-                // Handle both discrete (1-based) and continuous (0.0-1.0) values
-                let index = if value >= 1.0 {
-                    ((value as usize).saturating_sub(1)).min(self.grid.len() - 1)
-                } else {
-                    // Continuous value: map to 0..n
-                    ((value * self.grid.len() as f32) as usize).min(self.grid.len() - 1)
-                };
+
+                // Values must be 1-based integers: 1.0, 2.0, ..., n
+                assert!(value >= 1.0 && value <= n as f32 && value.fract() == 0.0,
+                        "Grid values must be integers in range [1, {}], found {}", n, value);
+
+                let index = (value as usize) - 1;
+
+                assert!(!seen[index], "Duplicate value {} found in grid", value);
+                seen[index] = true;
+
                 positions[index] = (row, col);
             }
         }
+
         positions
     }
 }
@@ -355,7 +369,7 @@ pub fn optimize_kernel(
     initial_temp: f64,
     cooling_rate: f64,
     seed: u64,
-    sequence_weight_strength: f32,
+    sequence_weight_strength: f64,
 ) -> Kernel {
     let mut initial_temp = initial_temp;
     let mut cooling_rate = cooling_rate;
@@ -400,11 +414,11 @@ pub fn optimize_kernel(
             let j = (random() as usize) % (current.len() - 1);
             let j = if j >= i { j + 1 } else { j };
 
-            let val1 = current[i] as usize - 1;
-            let val2 = current[j] as usize - 1;
+            let val_idx1 = current[i] as usize - 1;
+            let val_idx2 = current[j] as usize - 1;
 
             current.swap(i, j);
-            scorer.update_after_swap(val1, val2);
+            scorer.update_after_swap(val_idx1, val_idx2);
             let new_score = scorer.total_score();
             let delta = (new_score - current_score).abs();
 
@@ -415,12 +429,12 @@ pub fn optimize_kernel(
 
             // Undo the swap
             current.swap(i, j);
-            scorer.undo_swap(val1, val2);
+            scorer.undo_swap(val_idx1, val_idx2);
         }
 
         if delta_count > 0 {
-            let avg_delta = delta_sum / delta_count as f32;
-            initial_temp = (avg_delta * CALIBRATION_TEMP_MULTIPLIER) as f64;
+            let avg_delta = delta_sum / delta_count as f64;
+            initial_temp = avg_delta * CALIBRATION_TEMP_MULTIPLIER;
             println!("  Average delta: {:.4}, setting initial_temp = {:.4}", avg_delta, initial_temp);
         } else {
             println!("  No valid deltas found, using default initial_temp = {:.4}", initial_temp);
@@ -469,14 +483,14 @@ pub fn optimize_kernel(
         let j = if j >= i { j + 1 } else { j };
 
         // Get value indices for the positions we're swapping
-        let val1 = current[i] as usize - 1;
-        let val2 = current[j] as usize - 1;
+        let val_idx1 = current[i] as usize - 1;
+        let val_idx2 = current[j] as usize - 1;
 
         // Try swap in grid
         current.swap(i, j);
 
         // Update scorer incrementally
-        scorer.update_after_swap(val1, val2);
+        scorer.update_after_swap(val_idx1, val_idx2);
         let new_score = scorer.total_score();
 
         let delta = new_score - current_score;
@@ -488,7 +502,7 @@ pub fn optimize_kernel(
             // Fast random float in [0, 1): use top 53 bits for mantissa
             let random_bits = random() >> 11;
             let random_val = (random_bits as f64) * (1.0 / 9007199254740992.0); // 2^53
-            random_val < (delta as f64 / temperature).exp()
+            random_val < (delta / temperature).exp()
         };
 
         if accept {
@@ -503,7 +517,7 @@ pub fn optimize_kernel(
         } else {
             // Reject: swap back both current and scorer
             current.swap(i, j);
-            scorer.undo_swap(val1, val2);
+            scorer.undo_swap(val_idx1, val_idx2);
             rejects += 1;
         }
 
