@@ -10,8 +10,12 @@ struct IncrementalScorer {
     size: usize,
     positions: Vec<(usize, usize)>,
 
-    // Current total pairwise score (distance + alignment penalties)
-    pairwise_score: f32,
+    // Scores broken down by geometric relationship
+    vertical_score: f32,
+    horizontal_score: f32,
+    positive_diagonal_score: f32,  // slope = 1 (dr == dc, going up-right)
+    negative_diagonal_score: f32,  // slope = -1 (dr == -dc, going down-right)
+    other_score: f32,
 }
 
 impl IncrementalScorer {
@@ -20,25 +24,38 @@ impl IncrementalScorer {
         let mut scorer = IncrementalScorer {
             size,
             positions,
-            pairwise_score: 0.0,
+            vertical_score: 0.0,
+            horizontal_score: 0.0,
+            positive_diagonal_score: 0.0,
+            negative_diagonal_score: 0.0,
+            other_score: 0.0,
         };
 
-        // Calculate initial score
-        scorer.pairwise_score = scorer.calculate_full_pairwise_score();
+        // Calculate initial scores
+        scorer.calculate_full_scores();
 
         scorer
     }
 
-    /// Get total score
+    /// Get total score using current weights
     #[inline]
     fn total_score(&self) -> f32 {
-        self.pairwise_score
+        VERTICAL_WEIGHT * self.vertical_score
+            + HORIZONTAL_WEIGHT * self.horizontal_score
+            + POSITIVE_DIAGONAL_WEIGHT * self.positive_diagonal_score
+            + NEGATIVE_DIAGONAL_WEIGHT * self.negative_diagonal_score
+            + OTHER_WEIGHT * self.other_score
     }
 
-    /// Calculate pairwise score contribution for a single value index
+    /// Calculate score contributions for a single value index, broken down by geometry
     #[inline]
-    fn calculate_pairwise_for_value(&self, val_idx: usize) -> f32 {
-        let mut score = 0.0;
+    fn calculate_scores_for_value(&self, val_idx: usize) -> (f32, f32, f32, f32, f32) {
+        let mut vertical = 0.0;
+        let mut horizontal = 0.0;
+        let mut positive_diagonal = 0.0;
+        let mut negative_diagonal = 0.0;
+        let mut other = 0.0;
+
         let (r1, c1) = self.positions[val_idx];
 
         for other_idx in 0..self.positions.len() {
@@ -69,29 +86,38 @@ impl IncrementalScorer {
 
             let combined_weight = sequence_weight * position_weight;
 
-            // Reward distance squared
-            score += distance_sq * combined_weight;
+            // Distance contribution weighted by combined weight
+            let weighted_distance = distance_sq * combined_weight;
 
-            // Penalties for alignment (causes banding)
-            let alignment_penalty = if r1 == r2 || c1 == c2 {
-                // Same row or column - very bad
-                ALIGNMENT_PENALTY_SAME_LINE * combined_weight
+            // Classify by geometric relationship and add to appropriate bucket
+            if c1 == c2 {
+                // Same column (vertical alignment)
+                vertical += weighted_distance;
+            } else if r1 == r2 {
+                // Same row (horizontal alignment)
+                horizontal += weighted_distance;
             } else if dr == dc {
-                // Diagonal alignment - bad
-                ALIGNMENT_PENALTY_DIAGONAL * combined_weight
+                // Positive diagonal (slope = 1)
+                positive_diagonal += weighted_distance;
+            } else if dr == -dc {
+                // Negative diagonal (slope = -1)
+                negative_diagonal += weighted_distance;
             } else {
-                0.0
-            };
-
-            score += alignment_penalty;
+                // Everything else
+                other += weighted_distance;
+            }
         }
 
-        score
+        (vertical, horizontal, positive_diagonal, negative_diagonal, other)
     }
 
-    /// Calculate full pairwise score (used for initialization)
-    fn calculate_full_pairwise_score(&self) -> f32 {
-        let mut total = 0.0;
+    /// Calculate full scores for all buckets (used for initialization)
+    fn calculate_full_scores(&mut self) {
+        self.vertical_score = 0.0;
+        self.horizontal_score = 0.0;
+        self.positive_diagonal_score = 0.0;
+        self.negative_diagonal_score = 0.0;
+        self.other_score = 0.0;
 
         for i in 0..self.positions.len() {
             for j in (i + 1)..self.positions.len() {
@@ -107,45 +133,45 @@ impl IncrementalScorer {
                 let position_weight = 1.0 / ((i + 1) as f32).sqrt();
                 let combined_weight = sequence_weight * position_weight;
 
-                total += distance_sq * combined_weight;
+                let weighted_distance = distance_sq * combined_weight;
 
-                let alignment_penalty = if r1 == r2 || c1 == c2 {
-                    ALIGNMENT_PENALTY_SAME_LINE * combined_weight
+                // Classify by geometric relationship
+                if c1 == c2 {
+                    self.vertical_score += weighted_distance;
+                } else if r1 == r2 {
+                    self.horizontal_score += weighted_distance;
                 } else if dr == dc {
-                    ALIGNMENT_PENALTY_DIAGONAL * combined_weight
+                    self.positive_diagonal_score += weighted_distance;
+                } else if dr == -dc {
+                    self.negative_diagonal_score += weighted_distance;
                 } else {
-                    0.0
-                };
-
-                total += alignment_penalty;
+                    self.other_score += weighted_distance;
+                }
             }
         }
-
-        total
     }
 
-    /// Update score incrementally after swapping two value indices
+    /// Update scores incrementally after swapping two value indices
     /// val_idx1 and val_idx2 are the VALUE indices (0-based, from the positions array)
     fn update_after_swap(&mut self, val_idx1: usize, val_idx2: usize) {
         // Subtract out old contributions from both values
-        let old_contribution1 = self.calculate_pairwise_for_value(val_idx1);
-        let old_contribution2 = self.calculate_pairwise_for_value(val_idx2);
+        let (old_v1, old_h1, old_pd1, old_nd1, old_o1) = self.calculate_scores_for_value(val_idx1);
+        let (old_v2, old_h2, old_pd2, old_nd2, old_o2) = self.calculate_scores_for_value(val_idx2);
 
         // Swap positions
         self.positions.swap(val_idx1, val_idx2);
 
         // Add back new contributions
-        let new_contribution1 = self.calculate_pairwise_for_value(val_idx1);
-        let new_contribution2 = self.calculate_pairwise_for_value(val_idx2);
+        let (new_v1, new_h1, new_pd1, new_nd1, new_o1) = self.calculate_scores_for_value(val_idx1);
+        let (new_v2, new_h2, new_pd2, new_nd2, new_o2) = self.calculate_scores_for_value(val_idx2);
 
-        // Update pairwise score
-        // Note: we subtract old_contribution/2 because each pair is counted twice
-        // (once from each value's perspective), but we only want to count it once
-        self.pairwise_score = self.pairwise_score
-            - old_contribution1 / 2.0
-            - old_contribution2 / 2.0
-            + new_contribution1 / 2.0
-            + new_contribution2 / 2.0;
+        // Update all scores
+        // Note: we divide by 2 because each pair is counted twice (once from each value's perspective)
+        self.vertical_score += (new_v1 + new_v2 - old_v1 - old_v2) / 2.0;
+        self.horizontal_score += (new_h1 + new_h2 - old_h1 - old_h2) / 2.0;
+        self.positive_diagonal_score += (new_pd1 + new_pd2 - old_pd1 - old_pd2) / 2.0;
+        self.negative_diagonal_score += (new_nd1 + new_nd2 - old_nd1 - old_nd2) / 2.0;
+        self.other_score += (new_o1 + new_o2 - old_o1 - old_o2) / 2.0;
     }
 
     /// Undo a swap (used when rejecting a move)
@@ -156,9 +182,14 @@ impl IncrementalScorer {
     }
 }
 
-// Scoring constants
-const ALIGNMENT_PENALTY_SAME_LINE: f32 = -1.0; // Penalty for being in same row/column
-const ALIGNMENT_PENALTY_DIAGONAL: f32 = -2.0; // Penalty for being on a diagonal
+// Scoring weights for each geometric bucket
+// Lower weight = penalize this geometry (we don't want distance here)
+// Higher weight = reward this geometry (we want distance here)
+const VERTICAL_WEIGHT: f32 = 0.2;            // Weight for vertical (same column) alignments - BAD
+const HORIZONTAL_WEIGHT: f32 = 0.2;          // Weight for horizontal (same row) alignments - BAD
+const POSITIVE_DIAGONAL_WEIGHT: f32 = 0.5;   // Weight for positive diagonal (slope = 1) - LESS BAD
+const NEGATIVE_DIAGONAL_WEIGHT: f32 = 0.5;   // Weight for negative diagonal (slope = -1) - LESS BAD
+const OTHER_WEIGHT: f32 = 1.0;               // Weight for all other geometric relationships - GOOD
 
 /// Calculate toroidal (wrapped) distance component between two coordinates
 #[inline]
@@ -240,22 +271,21 @@ impl Kernel {
 
                 let combined_weight = sequence_weight * position_weight;
 
-                // Reward distance squared (no sqrt needed, gives more weight to larger distances)
-                // This is fine since we want to maximize separation
-                total_score += distance_sq * combined_weight;
+                // Distance contribution weighted by combined weight
+                let weighted_distance = distance_sq * combined_weight;
 
-                // Penalties for alignment (causes banding)
-                let alignment_penalty = if r1 == r2 || c1 == c2 {
-                    // Same row or column - very bad
-                    ALIGNMENT_PENALTY_SAME_LINE * combined_weight
+                // Classify by geometric relationship and add to total with appropriate weight
+                if c1 == c2 {
+                    total_score += VERTICAL_WEIGHT * weighted_distance;
+                } else if r1 == r2 {
+                    total_score += HORIZONTAL_WEIGHT * weighted_distance;
                 } else if dr == dc {
-                    // Diagonal alignment - bad
-                    ALIGNMENT_PENALTY_DIAGONAL * combined_weight
+                    total_score += POSITIVE_DIAGONAL_WEIGHT * weighted_distance;
+                } else if dr == -dc {
+                    total_score += NEGATIVE_DIAGONAL_WEIGHT * weighted_distance;
                 } else {
-                    0.0
-                };
-
-                total_score += alignment_penalty;
+                    total_score += OTHER_WEIGHT * weighted_distance;
+                }
             }
         }
 
