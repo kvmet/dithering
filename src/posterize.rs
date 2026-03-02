@@ -1,58 +1,57 @@
 use image::{DynamicImage, GenericImageView, ImageBuffer, Rgb};
 use crate::filters::ThresholdKernel;
 
-/// Posterize an image with CMY spread and dithered K channel
+/// Posterize an image with CMY spread (no dithering - just posterization)
 ///
 /// Algorithm:
-/// 1. Quantize all pixels to CMYKW palette
-/// 2. Spread/bloom the CMY channels by a radius
-/// 3. Dither the image to monochrome (K channel)
-/// 4. For white pixels in dithered output, replace with the spread CMY color
+/// 1. Extract C, M, Y channels as separate boolean masks
+/// 2. Spread each channel independently by the radius
+/// 3. Recombine CMY back to RGB
 ///
-/// This creates a screen-printing/halftone effect with bloomed color areas
-/// and dithered black details.
+/// This creates a posterized effect with bloomed color areas.
+/// Dithering happens separately when this is combined with the K channel.
 pub fn posterize_cmy_spread(
     img: &DynamicImage,
-    kernel: &ThresholdKernel,
     spread_radius: u32,
-    gamma: f32,
 ) -> ImageBuffer<Rgb<u8>, Vec<u8>> {
     let (width, height) = img.dimensions();
 
-    // Step 1: Quantize to CMYKW
-    let quantized = quantize_to_cmykw(img);
+    // Step 1: Extract C, M, Y channels as separate boolean masks
+    let (c_mask, m_mask, y_mask) = extract_cmy_channels(img);
 
-    // Step 2: Spread/bloom the CMY channels
-    let spread_cmy = spread_cmy_channels(&quantized, spread_radius);
+    // Step 2: Spread each channel independently
+    let c_spread = spread_channel(&c_mask, spread_radius);
+    let m_spread = spread_channel(&m_mask, spread_radius);
+    let y_spread = spread_channel(&y_mask, spread_radius);
 
-    // Step 3: Dither to monochrome (K channel)
-    let dithered_k = dither_monochrome(img, kernel, gamma);
-
-    // Step 4: Combine - use spread CMY where dithered is white, K where black
+    // Step 3: Recombine CMY back to RGB
     let mut output = ImageBuffer::new(width, height);
 
     for y in 0..height {
         for x in 0..width {
-            let k_pixel = dithered_k.get_pixel(x, y);
+            let c = c_spread.get_pixel(x, y)[0] > 128;
+            let m = m_spread.get_pixel(x, y)[0] > 128;
+            let y_cmy = y_spread.get_pixel(x, y)[0] > 128;
 
-            if k_pixel[0] > 128 {
-                // White in dithered = use spread CMY color
-                let cmy_color = spread_cmy.get_pixel(x, y);
-                output.put_pixel(x, y, *cmy_color);
-            } else {
-                // Black in dithered = use K
-                output.put_pixel(x, y, Rgb([0, 0, 0]));
-            }
+            // Convert CMY back to RGB
+            let r = if c { 0 } else { 255 };
+            let g = if m { 0 } else { 255 };
+            let b = if y_cmy { 0 } else { 255 };
+
+            output.put_pixel(x, y, Rgb([r, g, b]));
         }
     }
 
     output
 }
 
-/// Quantize image to CMYKW palette
-fn quantize_to_cmykw(img: &DynamicImage) -> ImageBuffer<Rgb<u8>, Vec<u8>> {
+/// Extract C, M, Y channels as separate boolean masks
+/// Returns (C_mask, M_mask, Y_mask) where 255 = channel is on, 0 = channel is off
+fn extract_cmy_channels(img: &DynamicImage) -> (ImageBuffer<Rgb<u8>, Vec<u8>>, ImageBuffer<Rgb<u8>, Vec<u8>>, ImageBuffer<Rgb<u8>, Vec<u8>>) {
     let (width, height) = img.dimensions();
-    let mut output = ImageBuffer::new(width, height);
+    let mut c_mask = ImageBuffer::new(width, height);
+    let mut m_mask = ImageBuffer::new(width, height);
+    let mut y_mask = ImageBuffer::new(width, height);
 
     for y in 0..height {
         for x in 0..width {
@@ -69,99 +68,88 @@ fn quantize_to_cmykw(img: &DynamicImage) -> ImageBuffer<Rgb<u8>, Vec<u8>> {
             // Find K (black) component
             let k = c.min(m).min(y_cmy);
 
-            // If mostly black, return K
-            if k > 0.7 {
-                output.put_pixel(x, y, Rgb([0, 0, 0]));
-                continue;
-            }
-
-            // If very light, return W
-            if k < 0.3 && c < 0.3 && m < 0.3 && y_cmy < 0.3 {
-                output.put_pixel(x, y, Rgb([255, 255, 255]));
-                continue;
-            }
-
-            // Remove K component from CMY
+            // Remove K component from CMY to get pure color components
             let c_adj = if k < 1.0 { (c - k) / (1.0 - k) } else { 0.0 };
             let m_adj = if k < 1.0 { (m - k) / (1.0 - k) } else { 0.0 };
             let y_adj = if k < 1.0 { (y_cmy - k) / (1.0 - k) } else { 0.0 };
 
-            // Determine which CMY channels are "on" (threshold at 0.5)
-            let c_on = c_adj > 0.5;
-            let m_on = m_adj > 0.5;
-            let y_on = y_adj > 0.5;
+            // Threshold each channel independently (>0.5 = on)
+            let c_on = if c_adj > 0.5 { 255 } else { 0 };
+            let m_on = if m_adj > 0.5 { 255 } else { 0 };
+            let y_on = if y_adj > 0.5 { 255 } else { 0 };
 
-            // Map back to RGB
-            let color = match (c_on, m_on, y_on) {
-                (true, true, true) => Rgb([0, 0, 0]),       // K (shouldn't happen but fallback)
-                (true, true, false) => Rgb([0, 0, 255]),    // C+M = Blue
-                (true, false, true) => Rgb([0, 255, 0]),    // C+Y = Green
-                (false, true, true) => Rgb([255, 0, 0]),    // M+Y = Red
-                (true, false, false) => Rgb([0, 255, 255]), // C = Cyan
-                (false, true, false) => Rgb([255, 0, 255]), // M = Magenta
-                (false, false, true) => Rgb([255, 255, 0]), // Y = Yellow
-                (false, false, false) => Rgb([255, 255, 255]), // White
-            };
-
-            output.put_pixel(x, y, color);
+            c_mask.put_pixel(x, y, Rgb([c_on, c_on, c_on]));
+            m_mask.put_pixel(x, y, Rgb([m_on, m_on, m_on]));
+            y_mask.put_pixel(x, y, Rgb([y_on, y_on, y_on]));
         }
     }
 
-    output
+    (c_mask, m_mask, y_mask)
 }
 
-/// Spread/bloom the CMY channels (expand colored areas)
-fn spread_cmy_channels(img: &ImageBuffer<Rgb<u8>, Vec<u8>>, radius: u32) -> ImageBuffer<Rgb<u8>, Vec<u8>> {
+/// Spread a single channel mask using morphological dilation
+/// Input: grayscale image where 255 = channel on, 0 = channel off
+fn spread_channel(mask: &ImageBuffer<Rgb<u8>, Vec<u8>>, radius: u32) -> ImageBuffer<Rgb<u8>, Vec<u8>> {
     if radius == 0 {
-        return img.clone();
+        return mask.clone();
     }
 
-    let (width, height) = img.dimensions();
-    let mut output = ImageBuffer::new(width, height);
+    let (width, height) = mask.dimensions();
+    let mut current = mask.clone();
 
-    for y in 0..height {
-        for x in 0..width {
-            let original = img.get_pixel(x, y);
+    // Dilate iteratively, one pixel at a time, for 'radius' iterations
+    for _ in 0..radius {
+        let mut next = ImageBuffer::new(width, height);
 
-            // If already colored (not K or W), keep it
-            if *original != Rgb([0, 0, 0]) && *original != Rgb([255, 255, 255]) {
-                output.put_pixel(x, y, *original);
-                continue;
-            }
+        for y in 0..height {
+            for x in 0..width {
+                let original = current.get_pixel(x, y)[0];
 
-            // Check neighborhood for CMY colors
-            let mut found_color = Rgb([255, 255, 255]); // Default to white
-            let mut found = false;
+                // If already on (255), keep it
+                if original > 128 {
+                    next.put_pixel(x, y, Rgb([255, 255, 255]));
+                    continue;
+                }
 
-            'outer: for dy in -(radius as i32)..=(radius as i32) {
-                for dx in -(radius as i32)..=(radius as i32) {
-                    let nx = (x as i32 + dx).clamp(0, width as i32 - 1) as u32;
-                    let ny = (y as i32 + dy).clamp(0, height as i32 - 1) as u32;
+                // Check immediate neighbors (4-connected)
+                let mut is_on = false;
 
-                    let neighbor = img.get_pixel(nx, ny);
+                // Check up, down, left, right
+                let neighbors = [
+                    (x as i32, y as i32 - 1), // up
+                    (x as i32, y as i32 + 1), // down
+                    (x as i32 - 1, y as i32), // left
+                    (x as i32 + 1, y as i32), // right
+                ];
 
-                    // If we find a CMY color (not K or W), use it
-                    if *neighbor != Rgb([0, 0, 0]) && *neighbor != Rgb([255, 255, 255]) {
-                        found_color = *neighbor;
-                        found = true;
-                        break 'outer; // Take first color found
+                for (nx, ny) in neighbors {
+                    if nx >= 0 && nx < width as i32 && ny >= 0 && ny < height as i32 {
+                        let neighbor = current.get_pixel(nx as u32, ny as u32)[0];
+
+                        // If any neighbor is on, turn this pixel on
+                        if neighbor > 128 {
+                            is_on = true;
+                            break;
+                        }
                     }
                 }
-            }
 
-            if found {
-                output.put_pixel(x, y, found_color);
-            } else {
-                output.put_pixel(x, y, *original);
+                let value = if is_on { 255 } else { 0 };
+                next.put_pixel(x, y, Rgb([value, value, value]));
             }
         }
+
+        current = next;
     }
 
-    output
+    current
 }
 
-/// Dither image to monochrome using perceptual brightness
-fn dither_monochrome(
+/// Combine posterized CMY with dithered K channel
+///
+/// Where the dithered K is black, use K; where it's white, use the posterized CMY color
+pub fn combine_cmy_with_dithered_k(
+    posterized_cmy: &ImageBuffer<Rgb<u8>, Vec<u8>>,
     img: &DynamicImage,
     kernel: &ThresholdKernel,
     gamma: f32,
@@ -188,7 +176,7 @@ fn dither_monochrome(
         }
     }
 
-    // Apply error diffusion dithering
+    // Apply error diffusion dithering and combine with posterized CMY
     let mut output = ImageBuffer::new(width, height);
 
     for y in 0..height {
@@ -206,9 +194,13 @@ fn dither_monochrome(
             let new_val = if old_val > threshold { 1.0 } else { 0.0 };
             let error = old_val - new_val;
 
-            // Set output pixel
-            let out_color = if new_val > 0.5 { 255 } else { 0 };
-            output.put_pixel(x, y, Rgb([out_color, out_color, out_color]));
+            // If dithered to black, use K; otherwise use posterized CMY
+            if new_val < 0.5 {
+                output.put_pixel(x, y, Rgb([0, 0, 0]));
+            } else {
+                let cmy_color = posterized_cmy.get_pixel(x, y);
+                output.put_pixel(x, y, *cmy_color);
+            }
 
             // Distribute error using Floyd-Steinberg weights
             if x + 1 < width {
