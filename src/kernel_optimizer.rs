@@ -4,15 +4,58 @@
 use std::fmt;
 use std::time::Instant;
 
-// Scoring weights for each geometric bucket
-// Lower weight = penalize this geometry (we don't want distance here)
-// Higher weight = reward this geometry (we want distance here)
-const VERTICAL_WEIGHT: f64 = 0.2;            // Weight for vertical (same column) alignments - BAD
-const HORIZONTAL_WEIGHT: f64 = 0.2;          // Weight for horizontal (same row) alignments - BAD
-const POSITIVE_DIAGONAL_WEIGHT: f64 = 0.3;   // Weight for positive diagonal (slope = 1) - LESS BAD
-const NEGATIVE_DIAGONAL_WEIGHT: f64 = 0.3;   // Weight for negative diagonal (slope = -1) - LESS BAD
-const KNIGHT_WEIGHT: f64 = 0.4;              // Weight for knight move patterns (2,1 or 1,2) - MEDIUM
-const OTHER_WEIGHT: f64 = 1.0;               // Weight for all other geometric relationships - GOOD
+/// Geometry weights for scoring different spatial relationships in kernel optimization.
+///
+/// These weights control how the optimizer evaluates the quality of value placements.
+/// Lower weights penalize certain geometric patterns (we don't want similar values there),
+/// while higher weights reward spreading similar values far apart in those patterns.
+///
+/// # Examples
+///
+/// ```
+/// use kernel_optimizer::GeometryWeights;
+///
+/// // Default weights
+/// let default = GeometryWeights::default();
+///
+/// // Custom weights - strongly penalize horizontal/vertical alignments
+/// let custom = GeometryWeights {
+///     vertical: 0.1,
+///     horizontal: 0.1,
+///     positive_diagonal: 0.3,
+///     negative_diagonal: 0.3,
+///     knight: 0.5,
+///     other: 1.0,
+/// };
+/// ```
+#[derive(Debug, Clone, Copy)]
+pub struct GeometryWeights {
+    /// Weight for vertical (same column) alignments - typically low to penalize
+    pub vertical: f64,
+    /// Weight for horizontal (same row) alignments - typically low to penalize
+    pub horizontal: f64,
+    /// Weight for positive diagonal (slope = 1) alignments
+    pub positive_diagonal: f64,
+    /// Weight for negative diagonal (slope = -1) alignments
+    pub negative_diagonal: f64,
+    /// Weight for knight move patterns (2,1 or 1,2 distance)
+    pub knight: f64,
+    /// Weight for all other geometric relationships - typically high to reward
+    pub other: f64,
+}
+
+impl Default for GeometryWeights {
+    fn default() -> Self {
+        Self {
+            vertical: 0.2,
+            horizontal: 0.2,
+            positive_diagonal: 0.3,
+            negative_diagonal: 0.3,
+            knight: 0.5,
+            other: 1.0,
+        }
+    }
+}
 
 // Linear Congruential Generator (LCG) constants
 const LCG_MULTIPLIER: u64 = 1664525;
@@ -29,6 +72,208 @@ const REPORT_INTERVAL: usize = 1_000_000;
 // Sequence weight interpolation
 const NO_SEQUENCE_PENALTY: f64 = 1.0; // Weight when sequence_weight_strength = 0
 
+/// Configuration builder for kernel optimization using simulated annealing.
+///
+/// This builder provides a fluent API for configuring all aspects of the kernel
+/// optimization process, including geometry weights, annealing parameters, and
+/// sequence weighting.
+///
+/// # Examples
+///
+/// Basic usage with defaults:
+/// ```
+/// use kernel_optimizer::OptimizerConfig;
+///
+/// let kernel = OptimizerConfig::new(4, 12345)
+///     .optimize();
+/// ```
+///
+/// Custom geometry weights:
+/// ```
+/// use kernel_optimizer::{OptimizerConfig, GeometryWeights};
+///
+/// let weights = GeometryWeights {
+///     vertical: 0.1,
+///     horizontal: 0.1,
+///     positive_diagonal: 0.3,
+///     negative_diagonal: 0.3,
+///     knight: 0.5,
+///     other: 1.0,
+/// };
+///
+/// let kernel = OptimizerConfig::new(4, 12345)
+///     .with_geometry_weights(weights)
+///     .with_iterations(1_000_000)
+///     .optimize();
+/// ```
+///
+/// Using convenience methods:
+/// ```
+/// use kernel_optimizer::OptimizerConfig;
+///
+/// let kernel = OptimizerConfig::new(4, 12345)
+///     .with_vertical_weight(0.15)
+///     .with_horizontal_weight(0.15)
+///     .with_knight_weight(0.6)
+///     .with_sequence_weight(0.8)
+///     .optimize();
+/// ```
+pub struct OptimizerConfig {
+    size: usize,
+    seed: u64,
+    iterations: Option<usize>,
+    initial_temp: f64,
+    cooling_rate: f64,
+    sequence_weight_strength: f64,
+    geometry_weights: GeometryWeights,
+}
+
+impl OptimizerConfig {
+    /// Create a new optimizer configuration with required parameters.
+    ///
+    /// # Arguments
+    /// * `size` - Width/height of the square kernel (e.g., 4 for a 4×4 kernel)
+    /// * `seed` - Random seed for reproducible optimization
+    ///
+    /// # Returns
+    /// A new configuration with sensible defaults:
+    /// - Auto-determined iterations based on size
+    /// - Auto-calibrated temperature and cooling rate
+    /// - Full sequence weight penalty (1.0)
+    /// - Default geometry weights
+    pub fn new(size: usize, seed: u64) -> Self {
+        // Auto-determine iterations based on size if not specified
+        let default_iterations = match size {
+            2 => 100_000,
+            3 => 1_000_000,
+            4 => 4_500_000,
+            5 => 15_000_000,
+            _ => 1_000_000 * size * size, // Scale with problem size
+        };
+
+        Self {
+            size,
+            seed,
+            iterations: Some(default_iterations),
+            initial_temp: 0.0, // Auto-calibrate by default
+            cooling_rate: 0.0, // Auto-compute by default
+            sequence_weight_strength: 1.0,
+            geometry_weights: GeometryWeights::default(),
+        }
+    }
+
+    /// Set the number of annealing iterations.
+    ///
+    /// More iterations generally produce better results but take longer.
+    /// Default is auto-determined based on kernel size.
+    pub fn with_iterations(mut self, iterations: usize) -> Self {
+        self.iterations = Some(iterations);
+        self
+    }
+
+    /// Set initial temperature for simulated annealing.
+    ///
+    /// Higher temperatures allow more exploration. Setting to 0.0 (default)
+    /// enables auto-calibration based on typical score deltas.
+    pub fn with_initial_temp(mut self, temp: f64) -> Self {
+        self.initial_temp = temp;
+        self
+    }
+
+    /// Set cooling rate for simulated annealing.
+    ///
+    /// Controls how quickly the temperature decreases. Setting to 0.0 (default)
+    /// auto-computes a rate that reaches 1% of initial temperature by the end.
+    pub fn with_cooling_rate(mut self, rate: f64) -> Self {
+        self.cooling_rate = rate;
+        self
+    }
+
+    /// Set sequence weight strength.
+    ///
+    /// Controls how much sequential values (1-2, 2-3, etc.) are penalized
+    /// for being close together:
+    /// - 0.0 = no penalty for sequential values being near each other
+    /// - 1.0 = full 1/distance penalty (default)
+    pub fn with_sequence_weight(mut self, strength: f64) -> Self {
+        self.sequence_weight_strength = strength;
+        self
+    }
+
+    /// Set custom geometry weights.
+    ///
+    /// Allows full control over how different spatial patterns are weighted
+    /// in the optimization objective function.
+    pub fn with_geometry_weights(mut self, weights: GeometryWeights) -> Self {
+        self.geometry_weights = weights;
+        self
+    }
+
+    /// Set vertical alignment weight (convenience method).
+    ///
+    /// Lower values discourage vertical alignments of similar values.
+    pub fn with_vertical_weight(mut self, weight: f64) -> Self {
+        self.geometry_weights.vertical = weight;
+        self
+    }
+
+    /// Set horizontal alignment weight (convenience method).
+    ///
+    /// Lower values discourage horizontal alignments of similar values.
+    pub fn with_horizontal_weight(mut self, weight: f64) -> Self {
+        self.geometry_weights.horizontal = weight;
+        self
+    }
+
+    /// Set both diagonal weights at once (convenience method).
+    pub fn with_diagonal_weights(mut self, positive: f64, negative: f64) -> Self {
+        self.geometry_weights.positive_diagonal = positive;
+        self.geometry_weights.negative_diagonal = negative;
+        self
+    }
+
+    /// Set knight move pattern weight (convenience method).
+    ///
+    /// Knight moves are (2,1) or (1,2) distances, like chess knight movement.
+    pub fn with_knight_weight(mut self, weight: f64) -> Self {
+        self.geometry_weights.knight = weight;
+        self
+    }
+
+    /// Set weight for all other geometric relationships (convenience method).
+    ///
+    /// Higher values encourage spreading similar values far apart in
+    /// non-aligned patterns.
+    pub fn with_other_weight(mut self, weight: f64) -> Self {
+        self.geometry_weights.other = weight;
+        self
+    }
+
+    /// Build and optimize a kernel with this configuration.
+    ///
+    /// This generates values 1 through size² and optimizes their arrangement
+    /// using simulated annealing with the configured parameters.
+    ///
+    /// # Returns
+    /// An optimized `Kernel` with values arranged to maximize the scoring function.
+    pub fn optimize(self) -> Kernel {
+        let values: Vec<f64> = (1..=(self.size * self.size))
+            .map(|i| i as f64)
+            .collect();
+
+        optimize_kernel_internal(
+            self.size,
+            values,
+            self.iterations.unwrap(),
+            self.initial_temp,
+            self.cooling_rate,
+            self.seed,
+            self.sequence_weight_strength,
+            self.geometry_weights,
+        )
+    }
+}
+
 /// Static score lookup table precomputed once for all possible position pairs
 /// Stores only geometry_weight * distance_sq (independent of value assignments)
 /// Position and sequence weights are applied at lookup time
@@ -44,10 +289,14 @@ pub struct ScoreLookup {
 
 impl ScoreLookup {
     pub fn new(size: usize) -> Self {
-        Self::new_with_sequence_weight(size, 1.0)
+        Self::new_with_config(size, 1.0, GeometryWeights::default())
     }
 
     pub fn new_with_sequence_weight(size: usize, sequence_weight_strength: f64) -> Self {
+        Self::new_with_config(size, sequence_weight_strength, GeometryWeights::default())
+    }
+
+    pub fn new_with_config(size: usize, sequence_weight_strength: f64, geometry_weights: GeometryWeights) -> Self {
         let n = size * size;
         let table_size = n * n;
         let mut table = vec![0.0; table_size];
@@ -89,12 +338,12 @@ impl ScoreLookup {
                 let is_neg_diagonal = (dr == -dc) as i32 as f64;
                 let is_knight = ((dr * dr + dc * dc) == 5) as i32 as f64;
 
-                let geometry_weight = is_vertical * VERTICAL_WEIGHT
-                    + is_horizontal * HORIZONTAL_WEIGHT
-                    + is_pos_diagonal * POSITIVE_DIAGONAL_WEIGHT
-                    + is_neg_diagonal * NEGATIVE_DIAGONAL_WEIGHT
-                    + is_knight * KNIGHT_WEIGHT
-                    + (1.0 - is_vertical - is_horizontal - is_pos_diagonal - is_neg_diagonal - is_knight) * OTHER_WEIGHT;
+                let geometry_weight = is_vertical * geometry_weights.vertical
+                    + is_horizontal * geometry_weights.horizontal
+                    + is_pos_diagonal * geometry_weights.positive_diagonal
+                    + is_neg_diagonal * geometry_weights.negative_diagonal
+                    + is_knight * geometry_weights.knight
+                    + (1.0 - is_vertical - is_horizontal - is_pos_diagonal - is_neg_diagonal - is_knight) * geometry_weights.other;
 
                 // Store only the geometry-weighted distance score
                 let base_score = geometry_weight * distance_sq;
@@ -191,8 +440,12 @@ impl IncrementalScorer {
     }
 
     pub fn new_with_sequence_weight(size: usize, positions: Vec<usize>, sequence_weight_strength: f64) -> Self {
+        Self::new_with_config(size, positions, sequence_weight_strength, GeometryWeights::default())
+    }
+
+    pub fn new_with_config(size: usize, positions: Vec<usize>, sequence_weight_strength: f64, geometry_weights: GeometryWeights) -> Self {
         println!("Building static score lookup table (sequence_weight_strength={:.2})...", sequence_weight_strength);
-        let lookup = ScoreLookup::new_with_sequence_weight(size, sequence_weight_strength);
+        let lookup = ScoreLookup::new_with_config(size, sequence_weight_strength, geometry_weights);
         println!("Lookup table built: {} entries ({:.2} MB)",
                  lookup.table.len(),
                  (lookup.table.len() * std::mem::size_of::<f64>()) as f64 / 1024.0 / 1024.0);
@@ -355,6 +608,8 @@ impl fmt::Display for Kernel {
 /// If initial_temp is 0.0, it will be auto-calibrated based on typical score deltas.
 /// If cooling_rate is 0.0, it will be computed to reach 1% of initial temp by the end.
 /// sequence_weight_strength: 0.0 = no sequence penalty, 1.0 = full 1/distance penalty (default)
+///
+/// **Note**: Consider using `OptimizerConfig` builder API for more flexibility
 pub fn optimize_kernel(
     size: usize,
     values: Vec<f64>,
@@ -363,6 +618,29 @@ pub fn optimize_kernel(
     cooling_rate: f64,
     seed: u64,
     sequence_weight_strength: f64,
+) -> Kernel {
+    optimize_kernel_internal(
+        size,
+        values,
+        iterations,
+        initial_temp,
+        cooling_rate,
+        seed,
+        sequence_weight_strength,
+        GeometryWeights::default(),
+    )
+}
+
+/// Internal optimization function with full configuration
+fn optimize_kernel_internal(
+    size: usize,
+    values: Vec<f64>,
+    iterations: usize,
+    initial_temp: f64,
+    cooling_rate: f64,
+    seed: u64,
+    sequence_weight_strength: f64,
+    geometry_weights: GeometryWeights,
 ) -> Kernel {
     let mut initial_temp = initial_temp;
     let mut cooling_rate = cooling_rate;
@@ -389,7 +667,7 @@ pub fn optimize_kernel(
     };
 
     // Initialize incremental scorer
-    let mut scorer = IncrementalScorer::new_with_sequence_weight(size, positions, sequence_weight_strength);
+    let mut scorer = IncrementalScorer::new_with_config(size, positions, sequence_weight_strength, geometry_weights);
     let mut current_score = scorer.total_score();
 
     let mut best_arrangement = current.clone();
@@ -607,5 +885,54 @@ mod tests {
         println!("\nScore with no sequence weight: {:.2}", score1);
         println!("Score with half sequence weight: {:.2}", score2);
         println!("Score with full sequence weight: {:.2}", score3);
+    }
+
+    #[test]
+    fn test_optimizer_config_builder() {
+        println!("\n=== Testing OptimizerConfig builder pattern ===");
+
+        // Basic usage with defaults
+        println!("\n--- Default weights ---");
+        let kernel1 = OptimizerConfig::new(4, 12345)
+            .with_iterations(50_000)
+            .optimize();
+        let positions1 = kernel1.build_positions();
+        let scorer1 = IncrementalScorer::new(4, positions1);
+        let score1 = scorer1.total_score();
+        println!("Score with default weights: {:.2}", score1);
+
+        // Custom geometry weights - penalize horizontal/vertical more
+        println!("\n--- Custom weights (stronger penalty on H/V) ---");
+        let custom_weights = GeometryWeights {
+            vertical: 0.1,
+            horizontal: 0.1,
+            positive_diagonal: 0.3,
+            negative_diagonal: 0.3,
+            knight: 0.5,
+            other: 1.0,
+        };
+        let kernel2 = OptimizerConfig::new(4, 12345)
+            .with_iterations(50_000)
+            .with_geometry_weights(custom_weights)
+            .optimize();
+        let positions2 = kernel2.build_positions();
+        let scorer2 = IncrementalScorer::new_with_config(4, positions2, 1.0, custom_weights);
+        let score2 = scorer2.total_score();
+        println!("Score with custom weights: {:.2}", score2);
+
+        // Using convenience methods
+        println!("\n--- Using convenience methods ---");
+        let kernel3 = OptimizerConfig::new(4, 12345)
+            .with_iterations(50_000)
+            .with_vertical_weight(0.15)
+            .with_horizontal_weight(0.15)
+            .with_knight_weight(0.6)
+            .optimize();
+        let positions3 = kernel3.build_positions();
+        let scorer3 = IncrementalScorer::new(4, positions3);
+        let score3 = scorer3.total_score();
+        println!("Score with convenience methods: {:.2}", score3);
+
+        println!("\n--- Builder pattern test complete ---");
     }
 }

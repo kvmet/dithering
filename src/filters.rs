@@ -149,11 +149,6 @@ impl ThresholdKernel {
         let size = width;
         let total = size * size;
 
-        // Generate evenly distributed values (1..N)
-        let values: Vec<f64> = (1..=total)
-            .map(|i| i as f64)
-            .collect();
-
         // Determine iteration counts based on size
         let iterations = match size {
             2 => 100_000,
@@ -163,16 +158,10 @@ impl ThresholdKernel {
             _ => panic!("Unsupported kernel size: {}x{}", width, height),
         };
 
-        // Use the optimized kernel_optimizer module with auto-calibration
-        let optimized_kernel = super::kernel_optimizer::optimize_kernel(
-            size,
-            values,
-            iterations,
-            0.0, // auto-calibrate initial_temp
-            0.0, // auto-compute cooling_rate
-            seed,
-            1.0, // sequence_weight_strength: use full 1/distance penalty
-        );
+        // Use the optimized kernel_optimizer module with builder API
+        let optimized_kernel = super::kernel_optimizer::OptimizerConfig::new(size, seed)
+            .with_iterations(iterations)
+            .optimize();
 
         // Convert from 1..N to 0..1 range
         let normalized: Vec<f64> = optimized_kernel.grid
