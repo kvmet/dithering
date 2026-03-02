@@ -194,35 +194,33 @@ impl IncrementalScorer {
         // Save old score for potential undo
         self.old_score = self.total_score;
 
-        // Calculate old pair scores from table (before swap)
-        let mut old_pairs_sum = 0.0;
+        // Calculate score delta in single pass
+        let mut delta = 0.0;
         let n = self.positions.len();
 
+        // Calculate old scores for val_idx1 and val_idx2 pairs
         for other_idx in 0..n {
-            if other_idx == val_idx1 || other_idx == val_idx2 {
-                continue;
+            if other_idx != val_idx1 && other_idx != val_idx2 {
+                delta -= self.get_pair_score(val_idx1, other_idx);
+                delta -= self.get_pair_score(val_idx2, other_idx);
             }
-            old_pairs_sum += self.get_pair_score(val_idx1, other_idx);
-            old_pairs_sum += self.get_pair_score(val_idx2, other_idx);
         }
-        old_pairs_sum += self.get_pair_score(val_idx1, val_idx2);
+        delta -= self.get_pair_score(val_idx1, val_idx2);
 
         // Swap positions
         self.positions.swap(val_idx1, val_idx2);
 
-        // Calculate new pair scores from lookup table (positions already swapped)
-        let mut new_pairs_sum = 0.0;
+        // Calculate new scores (positions already swapped)
         for other_idx in 0..n {
-            if other_idx == val_idx1 || other_idx == val_idx2 {
-                continue;
+            if other_idx != val_idx1 && other_idx != val_idx2 {
+                delta += self.get_pair_score(val_idx1, other_idx);
+                delta += self.get_pair_score(val_idx2, other_idx);
             }
-            new_pairs_sum += self.get_pair_score(val_idx1, other_idx);
-            new_pairs_sum += self.get_pair_score(val_idx2, other_idx);
         }
-        new_pairs_sum += self.get_pair_score(val_idx1, val_idx2);
+        delta += self.get_pair_score(val_idx1, val_idx2);
 
         // Update total score
-        self.total_score = self.total_score - old_pairs_sum + new_pairs_sum;
+        self.total_score += delta;
     }
 
     /// Undo a swap (used when rejecting a move)
@@ -339,7 +337,7 @@ pub fn optimize_kernel(
     let mut scorer = IncrementalScorer::new(size, positions);
     let mut current_score = scorer.total_score();
 
-    let mut best_kernel = Kernel::new(size, current.clone());
+    let mut best_arrangement = current.clone();
     let mut best_score = current_score;
 
     let mut temperature = initial_temp;
@@ -384,12 +382,11 @@ pub fn optimize_kernel(
             rejects = 0;
         }
 
-        // Pick two random positions to swap
+        // Pick two random positions to swap (reroll if same)
         let i = (random() as usize) % current.len();
-        let j = (random() as usize) % current.len();
-
-        if i == j {
-            continue;
+        let mut j = (random() as usize) % current.len();
+        while i == j {
+            j = (random() as usize) % current.len();
         }
 
         // Get value indices for the positions we're swapping
@@ -414,7 +411,7 @@ pub fn optimize_kernel(
 
             if current_score > best_score {
                 best_score = current_score;
-                best_kernel = Kernel::new(size, current.clone());
+                best_arrangement.copy_from_slice(&current);
             }
         } else {
             // Reject: swap back both current and scorer
@@ -431,7 +428,7 @@ pub fn optimize_kernel(
     println!("Best score found: {:.2}", best_score);
     println!("Total time: {:.2}s", start_time.elapsed().as_secs_f64());
 
-    best_kernel
+    Kernel::new(size, best_arrangement)
 }
 
 #[cfg(test)]
