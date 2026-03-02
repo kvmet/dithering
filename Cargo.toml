@@ -1,0 +1,9 @@
+[package]
+name = "image_filters"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+clap = { version = "4.5.60", features = ["derive"] }
+image = { version = "0.25.9", default-features = false, features = ["png", "bmp", "tiff", "webp", "gif"] }
+png = "0.18.1"
