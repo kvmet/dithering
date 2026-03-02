@@ -155,20 +155,21 @@ impl ThresholdKernel {
             .collect();
 
         // Determine iteration counts based on size
-        let (iterations, initial_temp, cooling_rate) = match size {
-            3 => (750_000, 10.0, 0.999995),
-            4 => (4_500_000, 100.0, 0.9999995),
-            5 => (15_000_000, 200.0, 0.99999975),
+        let iterations = match size {
+            2 => 100_000,
+            3 => 1_000_000,
+            4 => 4_500_000,
+            5 => 15_000_000,
             _ => panic!("Unsupported kernel size: {}x{}", width, height),
         };
 
-        // Use the optimized kernel_optimizer module
+        // Use the optimized kernel_optimizer module with auto-calibration
         let optimized_kernel = super::kernel_optimizer::optimize_kernel(
             size,
             values,
             iterations,
-            initial_temp,
-            cooling_rate,
+            0.0, // auto-calibrate initial_temp
+            0.0, // auto-compute cooling_rate
             seed,
             1.0, // sequence_weight_strength: use full 1/distance penalty
         );

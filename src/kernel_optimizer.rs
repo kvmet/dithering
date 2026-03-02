@@ -439,7 +439,7 @@ pub fn optimize_kernel(
 
     for iteration in 0..iterations {
         // Progress reporting
-        if iteration > 0 && (iteration % REPORT_INTERVAL == 0 || iteration == iterations - 1) {
+        if iteration % REPORT_INTERVAL == 0 || iteration == iterations - 1 {
             let elapsed = start_time.elapsed().as_secs_f64();
             let rate = iteration as f64 / elapsed;
             let accept_rate = if accepts + rejects > 0 {
@@ -455,12 +455,10 @@ pub fn optimize_kernel(
             rejects = 0;
         }
 
-        // Pick two random positions to swap (reroll if same)
+        // Pick two random positions to swap (ensure different)
         let i = (random() as usize) % current.len();
-        let mut j = (random() as usize) % current.len();
-        while i == j {
-            j = (random() as usize) % current.len();
-        }
+        let j = (random() as usize) % (current.len() - 1);
+        let j = if j >= i { j + 1 } else { j };
 
         // Get value indices for the positions we're swapping
         let val1 = current[i] as usize - 1;
@@ -476,8 +474,16 @@ pub fn optimize_kernel(
         let delta = new_score - current_score;
 
         // Accept if better, or sometimes if worse based on temperature
-        let random_val = (random() as f64) / (u64::MAX as f64);
-        if delta > 0.0 || random_val < (delta as f64 / temperature).exp() {
+        let accept = if delta > 0.0 {
+            true
+        } else {
+            // Fast random float in [0, 1): use top 53 bits for mantissa
+            let random_bits = random() >> 11;
+            let random_val = (random_bits as f64) * (1.0 / 9007199254740992.0); // 2^53
+            random_val < (delta as f64 / temperature).exp()
+        };
+
+        if accept {
             // Accept the swap
             current_score = new_score;
             accepts += 1;
