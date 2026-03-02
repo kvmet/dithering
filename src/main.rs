@@ -278,7 +278,8 @@ fn main() {
 
         for &dist in &distances_to_show {
             if dist > 0 && dist < n {
-                lookup.print_score_matrix(dist);
+                // Use value indices 0 and dist to demonstrate the score matrix for this distance
+                lookup.print_score_matrix(dist, 0, dist);
             }
         }
 

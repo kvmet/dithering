@@ -4,10 +4,11 @@
 use std::fmt;
 use std::time::Instant;
 
-/// Static score lookup table precomputed once for all possible arrangements
-/// lookup[pos_i][pos_j][value_distance] = score contribution for positions with given value distance
+/// Static score lookup table precomputed once for all possible position pairs
+/// Stores only geometry_weight * distance_sq (independent of value assignments)
+/// Position and sequence weights are applied at lookup time
 pub struct ScoreLookup {
-    // Flattened 3D array: [pos_i * n * (n-1) + pos_j * (n-1) + (value_distance - 1)]
+    // Flattened 2D array: [pos_i * n + pos_j]
     table: Vec<f32>,
     n: usize, // grid size (total number of values/positions)
     size: usize, // grid width/height
@@ -16,11 +17,10 @@ pub struct ScoreLookup {
 impl ScoreLookup {
     pub fn new(size: usize) -> Self {
         let n = size * size;
-        let max_value_distance = n - 1;
-        let table_size = n * n * max_value_distance;
+        let table_size = n * n;
         let mut table = vec![0.0; table_size];
 
-        // Precompute all possible scores
+        // Precompute geometry_weight * distance_sq for all position pairs
         for pos_i in 0..n {
             let (r1, c1) = (pos_i / size, pos_i % size);
 
@@ -49,18 +49,10 @@ impl ScoreLookup {
                     + is_knight * KNIGHT_WEIGHT
                     + (1.0 - is_vertical - is_horizontal - is_pos_diagonal - is_neg_diagonal - is_knight) * OTHER_WEIGHT;
 
-                // For each possible value distance
-                for value_distance in 1..=max_value_distance {
-                    let sequence_weight = 1.0 / value_distance as f32;
-                    // Position weight uses the smaller value index (0-based)
-                    // We approximate by using value_distance as a proxy
-                    let position_weight = 1.0 / ((n - value_distance + 1) as f32).sqrt();
-                    let combined_weight = sequence_weight * position_weight;
-
-                    let score = geometry_weight * distance_sq * combined_weight;
-                    let idx = pos_i * n * max_value_distance + pos_j * max_value_distance + (value_distance - 1);
-                    table[idx] = score;
-                }
+                // Store only the geometry-weighted distance score
+                let base_score = geometry_weight * distance_sq;
+                let idx = pos_i * n + pos_j;
+                table[idx] = base_score;
             }
         }
 
@@ -69,23 +61,33 @@ impl ScoreLookup {
 
     #[inline]
     fn get(&self, val_i: usize, val_j: usize, pos_i: usize, pos_j: usize) -> f32 {
-        let value_distance = if val_i > val_j { val_i - val_j } else { val_j - val_i };
-        if value_distance == 0 {
+        if val_i == val_j {
             return 0.0;
         }
-        let max_value_distance = self.n - 1;
-        let idx = pos_i * self.n * max_value_distance + pos_j * max_value_distance + (value_distance - 1);
-        self.table[idx]
+
+        // Get base geometry-weighted distance score
+        let idx = pos_i * self.n + pos_j;
+        let base_score = self.table[idx];
+
+        // Apply value-dependent weights
+        let value_distance = if val_i > val_j { val_i - val_j } else { val_j - val_i };
+        let sequence_weight = 1.0 / value_distance as f32;
+
+        let smaller_val = val_i.min(val_j);
+        let position_weight = 1.0 / (smaller_val + 1) as f32;
+
+        base_score * sequence_weight * position_weight
     }
 
-    /// Print the normalized distance score matrix for a given value distance
-    pub fn print_score_matrix(&self, value_distance: usize) {
+    /// Print the score matrix for a given value distance
+    /// Shows how scores would be calculated if values at distance `value_distance` were placed at each position pair
+    pub fn print_score_matrix(&self, value_distance: usize, val_i: usize, val_j: usize) {
         if value_distance == 0 || value_distance >= self.n {
             println!("Invalid value_distance: {} (must be 1..{})", value_distance, self.n - 1);
             return;
         }
 
-        println!("Score matrix for value distance = {} ({}x{} grid):", value_distance, self.size, self.size);
+        println!("Score matrix for values {} and {} (distance={}, {}x{} grid):", val_i, val_j, value_distance, self.size, self.size);
         println!("Each cell shows the score contribution for that position pair.");
         println!();
 
@@ -110,9 +112,7 @@ impl ScoreLookup {
                 if pos_i == pos_j {
                     print!("   -   ");
                 } else {
-                    let max_value_distance = self.n - 1;
-                    let idx = pos_i * self.n * max_value_distance + pos_j * max_value_distance + (value_distance - 1);
-                    let score = self.table[idx];
+                    let score = self.get(val_i, val_j, pos_i, pos_j);
                     print!("{:7.3}", score);
                 }
             }
@@ -243,7 +243,7 @@ const HORIZONTAL_WEIGHT: f32 = 0.1;          // Weight for horizontal (same row)
 const POSITIVE_DIAGONAL_WEIGHT: f32 = 0.144;   // Weight for positive diagonal (slope = 1) - LESS BAD
 const NEGATIVE_DIAGONAL_WEIGHT: f32 = 0.144;   // Weight for negative diagonal (slope = -1) - LESS BAD
 const KNIGHT_WEIGHT: f32 = 0.5;              // Weight for knight move patterns (2,1 or 1,2) - MEDIUM
-const OTHER_WEIGHT: f32 = 10.0;               // Weight for all other geometric relationships - GOOD
+const OTHER_WEIGHT: f32 = 2.0;               // Weight for all other geometric relationships - GOOD
 
 /// Calculate toroidal (wrapped) distance component between two coordinates
 #[inline]
@@ -317,9 +317,6 @@ impl Kernel {
                 let (r2, c2) = positions[j];
                 let pos_i = r1 * self.size + c1;
                 let pos_j = r2 * self.size + c2;
-
-                // Value distance
-                let value_distance = j - i;
 
                 total_score += lookup.get(i, j, pos_i, pos_j);
             }
