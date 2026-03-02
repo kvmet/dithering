@@ -244,7 +244,9 @@ fn main() {
 
         // Compute and display score
         let kernel_obj = kernel_optimizer::Kernel::new(kernel.width, kernel.values.clone());
-        let score = kernel_obj.score();
+        let positions = kernel_obj.build_positions();
+        let scorer = kernel_optimizer::IncrementalScorer::new(kernel.width, positions);
+        let score = scorer.total_score();
         println!("Score: {:.2}", score);
 
         return;
@@ -258,7 +260,9 @@ fn main() {
         // Build the kernel and compute scoring table
         use kernel_optimizer::Kernel;
         let kernel_obj = Kernel::new(kernel.width, kernel.values.clone());
-        let score = kernel_obj.score();
+        let positions = kernel_obj.build_positions();
+        let scorer = kernel_optimizer::IncrementalScorer::new(kernel.width, positions);
+        let score = scorer.total_score();
 
         println!("Overall Score: {:.2}", score);
         println!();

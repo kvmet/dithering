@@ -123,7 +123,7 @@ impl ScoreLookup {
 }
 
 /// Incremental scorer that uses static lookup table for O(1) pair score lookups
-struct IncrementalScorer {
+pub struct IncrementalScorer {
     size: usize,
     positions: Vec<(usize, usize)>, // positions[val_idx] = (row, col) where that value is located
     lookup: ScoreLookup,
@@ -137,7 +137,7 @@ struct IncrementalScorer {
 
 impl IncrementalScorer {
     /// Initialize scorer with starting positions
-    fn new(size: usize, positions: Vec<(usize, usize)>) -> Self {
+    pub fn new(size: usize, positions: Vec<(usize, usize)>) -> Self {
         println!("Building static score lookup table...");
         let lookup = ScoreLookup::new(size);
         println!("Lookup table built: {} entries ({:.2} MB)",
@@ -160,7 +160,7 @@ impl IncrementalScorer {
 
     /// Get total score
     #[inline]
-    fn total_score(&self) -> f32 {
+    pub fn total_score(&self) -> f32 {
         self.total_score
     }
 
@@ -240,10 +240,10 @@ impl IncrementalScorer {
 // Higher weight = reward this geometry (we want distance here)
 const VERTICAL_WEIGHT: f32 = 0.1;            // Weight for vertical (same column) alignments - BAD
 const HORIZONTAL_WEIGHT: f32 = 0.1;          // Weight for horizontal (same row) alignments - BAD
-const POSITIVE_DIAGONAL_WEIGHT: f32 = 0.144;   // Weight for positive diagonal (slope = 1) - LESS BAD
-const NEGATIVE_DIAGONAL_WEIGHT: f32 = 0.144;   // Weight for negative diagonal (slope = -1) - LESS BAD
-const KNIGHT_WEIGHT: f32 = 0.5;              // Weight for knight move patterns (2,1 or 1,2) - MEDIUM
-const OTHER_WEIGHT: f32 = 2.0;               // Weight for all other geometric relationships - GOOD
+const POSITIVE_DIAGONAL_WEIGHT: f32 = 0.12;   // Weight for positive diagonal (slope = 1) - LESS BAD
+const NEGATIVE_DIAGONAL_WEIGHT: f32 = 0.12;   // Weight for negative diagonal (slope = -1) - LESS BAD
+const KNIGHT_WEIGHT: f32 = 0.17;              // Weight for knight move patterns (2,1 or 1,2) - MEDIUM
+const OTHER_WEIGHT: f32 = 1.0;               // Weight for all other geometric relationships - GOOD
 
 /// Calculate toroidal (wrapped) distance component between two coordinates
 #[inline]
@@ -273,7 +273,7 @@ impl Kernel {
     }
 
     /// Build position map: value -> (row, col)
-    fn build_positions(&self) -> Vec<(usize, usize)> {
+    pub fn build_positions(&self) -> Vec<(usize, usize)> {
         let mut positions = vec![(0, 0); self.grid.len()];
         for row in 0..self.size {
             for col in 0..self.size {
@@ -289,40 +289,6 @@ impl Kernel {
             }
         }
         positions
-    }
-
-    /// Calculate the score for this arrangement
-    /// Higher score = better for ordered dithering
-    ///
-    /// Scoring considers:
-    /// - Toroidal (wrapped) squared distances between sequential values
-    ///   (using squared distance gives quadratic reward, encouraging maximum spread)
-    /// - Position-based weighting (early values weighted more)
-    /// - Penalties for row/column/diagonal alignment
-    pub fn score(&self) -> f32 {
-        let positions = self.build_positions();
-        self.score_with_positions(&positions)
-    }
-
-    /// Calculate score using pre-built position map
-    /// This is more efficient when positions are already known
-    fn score_with_positions(&self, positions: &[(usize, usize)]) -> f32 {
-        // Use the static lookup table for efficient scoring
-        let lookup = ScoreLookup::new(self.size);
-        let mut total_score = 0.0;
-
-        for i in 0..positions.len() {
-            for j in (i + 1)..positions.len() {
-                let (r1, c1) = positions[i];
-                let (r2, c2) = positions[j];
-                let pos_i = r1 * self.size + c1;
-                let pos_j = r2 * self.size + c2;
-
-                total_score += lookup.get(i, j, pos_i, pos_j);
-            }
-        }
-
-        total_score
     }
 }
 
@@ -384,10 +350,7 @@ pub fn optimize_kernel(
     let mut rejects = 0;
     let check_interval = 10000;
 
-    // Strategy: start with greedy/smart moves, transition to random
-    let greedy_phase_end = iterations / 10; // First 10% is greedy-ish
-
-    println!("Starting simulated annealing (incremental scoring + adaptive cooling + smart moves)...");
+    println!("Starting simulated annealing (incremental scoring + adaptive cooling)...");
     println!("Initial score: {:.2}", current_score);
 
     for iteration in 0..iterations {
@@ -422,24 +385,8 @@ pub fn optimize_kernel(
         }
 
         // Pick two random positions to swap
-        let i;
-        let j;
-
-        // Smart move strategy: during greedy phase, try to fix alignments
-        if iteration < greedy_phase_end && (random() % 3) == 0 {
-            // Try to swap aligned values
-            if let Some((pos1, pos2)) = find_aligned_pair(&scorer.positions, size, &mut random) {
-                i = pos1;
-                j = pos2;
-            } else {
-                i = (random() as usize) % current.len();
-                j = (random() as usize) % current.len();
-            }
-        } else {
-            // Random swap
-            i = (random() as usize) % current.len();
-            j = (random() as usize) % current.len();
-        }
+        let i = (random() as usize) % current.len();
+        let j = (random() as usize) % current.len();
 
         if i == j {
             continue;
@@ -487,39 +434,6 @@ pub fn optimize_kernel(
     best_kernel
 }
 
-/// Find a pair of values that are currently aligned (for smart swapping)
-fn find_aligned_pair(
-    positions: &[(usize, usize)],
-    size: usize,
-    random: &mut impl FnMut() -> u64,
-) -> Option<(usize, usize)> {
-    // Try a few random pairs to find aligned ones
-    for _ in 0..10 {
-        let i = (random() as usize) % positions.len();
-        let j = (random() as usize) % positions.len();
-
-        if i == j {
-            continue;
-        }
-
-        let (r1, c1) = positions[i];
-        let (r2, c2) = positions[j];
-
-        // Check if aligned (row, column, or diagonal)
-        let dr = toroidal_distance_component(r1, r2, size);
-        let dc = toroidal_distance_component(c1, c2, size);
-
-        if r1 == r2 || c1 == c2 || dr == dc {
-            // Found aligned pair - return grid positions
-            let pos1 = r1 * size + c1;
-            let pos2 = r2 * size + c2;
-            return Some((pos1, pos2));
-        }
-    }
-
-    None
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -529,8 +443,14 @@ mod tests {
         let kernel1 = Kernel::new(2, vec![1.0, 2.0, 3.0, 4.0]);
         let kernel2 = Kernel::new(2, vec![1.0, 4.0, 3.0, 2.0]);
 
-        let score1 = kernel1.score();
-        let score2 = kernel2.score();
+        let positions1 = kernel1.build_positions();
+        let positions2 = kernel2.build_positions();
+
+        let scorer1 = IncrementalScorer::new(2, positions1);
+        let scorer2 = IncrementalScorer::new(2, positions2);
+
+        let score1 = scorer1.total_score();
+        let score2 = scorer2.total_score();
 
         println!("Kernel 1 score: {:.2}", score1);
         println!("Kernel 2 score: {:.2}", score2);
@@ -545,6 +465,9 @@ mod tests {
 
         println!("Optimized 4x4 arrangement:");
         println!("{}", kernel);
-        println!("Score: {:.2}", kernel.score());
+
+        let positions = kernel.build_positions();
+        let scorer = IncrementalScorer::new(4, positions);
+        println!("Score: {:.2}", scorer.total_score());
     }
 }
