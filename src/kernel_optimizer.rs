@@ -4,6 +4,12 @@
 use std::fmt;
 use std::time::Instant;
 
+// Scoring constants
+const ALIGNMENT_PENALTY_SAME_LINE: f32 = -5.0;
+const ALIGNMENT_PENALTY_DIAGONAL: f32 = -3.0;
+const CLUSTERING_PENALTY_MULTIPLIER: f32 = 2.0;
+const NEARBY_SEQUENTIAL_WINDOW: usize = 3;
+
 #[derive(Clone)]
 pub struct Kernel {
     pub grid: Vec<f32>,
@@ -46,17 +52,13 @@ impl Kernel {
     /// - Penalties for row/column/diagonal alignment
     /// - Clustering detection within appropriate radius
     pub fn score(&self) -> f32 {
-        // Build a map of value -> position
-        let mut positions = vec![(0, 0); self.grid.len()];
+        let positions = self.build_positions();
+        self.score_with_positions(&positions)
+    }
 
-        for row in 0..self.size {
-            for col in 0..self.size {
-                let value = self.get(row, col);
-                let index = (value as usize) - 1; // Assuming values are 1..N
-                positions[index] = (row, col);
-            }
-        }
-
+    /// Calculate score using pre-built position map
+    /// This is more efficient when positions are already known
+    fn score_with_positions(&self, positions: &[(usize, usize)]) -> f32 {
         let mut total_score = 0.0;
 
         // Calculate pairwise distances with weighting
@@ -87,10 +89,10 @@ impl Kernel {
                 // Penalties for alignment (causes banding)
                 let alignment_penalty = if r1 == r2 || c1 == c2 {
                     // Same row or column - very bad
-                    -5.0 * combined_weight
+                    ALIGNMENT_PENALTY_SAME_LINE * combined_weight
                 } else if dr == dc {
                     // Diagonal alignment - bad but less so
-                    -3.0 * combined_weight
+                    ALIGNMENT_PENALTY_DIAGONAL * combined_weight
                 } else {
                     0.0
                 };
@@ -121,9 +123,9 @@ impl Kernel {
             let mut nearby_sequential = 0;
 
             // Check for sequential values within radius
-            // Look in window [i-3, i+3] excluding i itself
-            let start = if i >= 3 { i - 3 } else { 0 };
-            let end = (i + 4).min(positions.len());
+            // Look in window [i-NEARBY_SEQUENTIAL_WINDOW, i+NEARBY_SEQUENTIAL_WINDOW] excluding i itself
+            let start = if i >= NEARBY_SEQUENTIAL_WINDOW { i - NEARBY_SEQUENTIAL_WINDOW } else { 0 };
+            let end = (i + NEARBY_SEQUENTIAL_WINDOW + 1).min(positions.len());
 
             for j in start..end {
                 if j == i {
@@ -145,7 +147,7 @@ impl Kernel {
             // Penalize based on how many sequential neighbors are nearby
             // Weight by position (early values matter more)
             let position_weight = 1.0 / ((i + 1) as f32).sqrt();
-            penalty -= (nearby_sequential as f32) * 2.0 * position_weight;
+            penalty -= (nearby_sequential as f32) * CLUSTERING_PENALTY_MULTIPLIER * position_weight;
         }
 
         penalty
@@ -268,7 +270,13 @@ pub fn optimize_kernel(
         // Try swap
         current.swap(i, j);
         let new_kernel = Kernel::new(size, current.clone());
-        let new_score = new_kernel.score();
+
+        // Update positions map for the swap
+        let val1 = current[i] as usize - 1;
+        let val2 = current[j] as usize - 1;
+        positions.swap(val1, val2);
+
+        let new_score = new_kernel.score_with_positions(&positions);
 
         let delta = new_score - current_score;
 
@@ -278,12 +286,7 @@ pub fn optimize_kernel(
             // Accept the swap
             current_score = new_score;
             current_kernel = new_kernel;
-
-            // Update positions map
-            let val1 = current[i] as usize - 1;
-            let val2 = current[j] as usize - 1;
-            positions.swap(val1, val2);
-
+            // Positions already updated above
             accepts += 1;
 
             if current_score > best_score {
@@ -291,8 +294,11 @@ pub fn optimize_kernel(
                 best_kernel = current_kernel.clone();
             }
         } else {
-            // Reject: swap back
+            // Reject: swap back both current and positions
             current.swap(i, j);
+            let val1 = current[i] as usize - 1;
+            let val2 = current[j] as usize - 1;
+            positions.swap(val1, val2);
             rejects += 1;
         }
 
