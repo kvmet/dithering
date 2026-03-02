@@ -12,9 +12,6 @@ struct IncrementalScorer {
 
     // Current total pairwise score (distance + alignment penalties)
     pairwise_score: f32,
-
-    // Current total clustering penalty
-    clustering_penalty: f32,
 }
 
 impl IncrementalScorer {
@@ -24,12 +21,10 @@ impl IncrementalScorer {
             size,
             positions,
             pairwise_score: 0.0,
-            clustering_penalty: 0.0,
         };
 
-        // Calculate initial scores
+        // Calculate initial score
         scorer.pairwise_score = scorer.calculate_full_pairwise_score();
-        scorer.clustering_penalty = scorer.calculate_full_clustering_penalty();
 
         scorer
     }
@@ -37,7 +32,7 @@ impl IncrementalScorer {
     /// Get total score
     #[inline]
     fn total_score(&self) -> f32 {
-        self.pairwise_score + self.clustering_penalty
+        self.pairwise_score
     }
 
     /// Calculate pairwise score contribution for a single value index
@@ -127,45 +122,6 @@ impl IncrementalScorer {
         total
     }
 
-    /// Calculate full clustering penalty (for now, recalculated each time)
-    fn calculate_full_clustering_penalty(&self) -> f32 {
-        let cluster_radius = if self.size > 3 { self.size - 3 } else { 0 };
-        if cluster_radius == 0 {
-            return 0.0;
-        }
-
-        let mut penalty = 0.0;
-        let radius_sq = (cluster_radius * cluster_radius) as i32;
-
-        for i in 0..self.positions.len() {
-            let (r1, c1) = self.positions[i];
-            let mut nearby_sequential = 0;
-
-            let start = if i >= NEARBY_SEQUENTIAL_WINDOW { i - NEARBY_SEQUENTIAL_WINDOW } else { 0 };
-            let end = (i + NEARBY_SEQUENTIAL_WINDOW + 1).min(self.positions.len());
-
-            for j in start..end {
-                if j == i {
-                    continue;
-                }
-
-                let (r2, c2) = self.positions[j];
-                let dr = toroidal_distance_component(r1, r2, self.size);
-                let dc = toroidal_distance_component(c1, c2, self.size);
-                let dist_sq = dr * dr + dc * dc;
-
-                if dist_sq <= radius_sq {
-                    nearby_sequential += 1;
-                }
-            }
-
-            let position_weight = 1.0 / ((i + 1) as f32).sqrt();
-            penalty -= (nearby_sequential as f32) * CLUSTERING_PENALTY_MULTIPLIER * position_weight;
-        }
-
-        penalty
-    }
-
     /// Update score incrementally after swapping two value indices
     /// val_idx1 and val_idx2 are the VALUE indices (0-based, from the positions array)
     fn update_after_swap(&mut self, val_idx1: usize, val_idx2: usize) {
@@ -188,9 +144,6 @@ impl IncrementalScorer {
             - old_contribution2 / 2.0
             + new_contribution1 / 2.0
             + new_contribution2 / 2.0;
-
-        // Recalculate clustering penalty (not optimized yet)
-        self.clustering_penalty = self.calculate_full_clustering_penalty();
     }
 
     /// Undo a swap (used when rejecting a move)
@@ -202,10 +155,10 @@ impl IncrementalScorer {
 }
 
 // Scoring constants
-const ALIGNMENT_PENALTY_SAME_LINE: f32 = -5.0;
-const ALIGNMENT_PENALTY_DIAGONAL: f32 = -3.0;
-const CLUSTERING_PENALTY_MULTIPLIER: f32 = 2.0;
-const NEARBY_SEQUENTIAL_WINDOW: usize = 3;
+const ALIGNMENT_PENALTY: f32 = 5.0; // Overall alignment penalty strength
+const DIAGONAL_REJECTION: f32 = 1.5;
+const ALIGNMENT_PENALTY_SAME_LINE: f32 = -ALIGNMENT_PENALTY; // Penalty for being in same row/column
+const ALIGNMENT_PENALTY_DIAGONAL: f32 = DIAGONAL_REJECTION * 0.7071 * ALIGNMENT_PENALTY_SAME_LINE; // Penalty for being on a diagonal
 
 /// Calculate toroidal (wrapped) distance component between two coordinates
 #[inline]
@@ -255,7 +208,6 @@ impl Kernel {
     ///   (using squared distance gives quadratic reward, encouraging maximum spread)
     /// - Position-based weighting (early values weighted more)
     /// - Penalties for row/column/diagonal alignment
-    /// - Clustering detection within appropriate radius
     pub fn score(&self) -> f32 {
         let positions = self.build_positions();
         self.score_with_positions(&positions)
@@ -307,56 +259,7 @@ impl Kernel {
             }
         }
 
-        // Clustering detection
-        // Radius based on grid size: size - 3 (so 4x4 checks immediate neighbors, 5x5 checks 2 levels, etc.)
-        let cluster_radius = if self.size > 3 { self.size - 3 } else { 0 };
-
-        if cluster_radius > 0 {
-            let cluster_penalty = self.calculate_clustering_penalty(&positions, cluster_radius);
-            total_score += cluster_penalty;
-        }
-
         total_score
-    }
-
-    /// Calculate penalty for sequential values being clustered together
-    fn calculate_clustering_penalty(&self, positions: &[(usize, usize)], radius: usize) -> f32 {
-        let mut penalty = 0.0;
-        let radius_sq = (radius * radius) as i32;
-
-        for i in 0..positions.len() {
-            let (r1, c1) = positions[i];
-            let mut nearby_sequential = 0;
-
-            // Check for sequential values within radius
-            // Look in window [i-NEARBY_SEQUENTIAL_WINDOW, i+NEARBY_SEQUENTIAL_WINDOW] excluding i itself
-            let start = if i >= NEARBY_SEQUENTIAL_WINDOW { i - NEARBY_SEQUENTIAL_WINDOW } else { 0 };
-            let end = (i + NEARBY_SEQUENTIAL_WINDOW + 1).min(positions.len());
-
-            for j in start..end {
-                if j == i {
-                    continue;
-                }
-
-                let (r2, c2) = positions[j];
-
-                // Calculate toroidal distance squared
-                let dr = toroidal_distance_component(r1, r2, self.size);
-                let dc = toroidal_distance_component(c1, c2, self.size);
-                let dist_sq = dr * dr + dc * dc;
-
-                if dist_sq <= radius_sq {
-                    nearby_sequential += 1;
-                }
-            }
-
-            // Penalize based on how many sequential neighbors are nearby
-            // Weight by position (early values matter more)
-            let position_weight = 1.0 / ((i + 1) as f32).sqrt();
-            penalty -= (nearby_sequential as f32) * CLUSTERING_PENALTY_MULTIPLIER * position_weight;
-        }
-
-        penalty
     }
 }
 
