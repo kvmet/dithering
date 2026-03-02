@@ -56,17 +56,10 @@ pub fn posterize_cmy_spread(
 
             // Subtractive color mixing: start with white, subtract each channel
             // C subtracts red, M subtracts green, Y subtracts blue
-            // When all three are on (C+M+Y), we get white to preserve K channel
+            // Overlaps naturally create darker colors (R+G=Yellow, G+B=Cyan, R+B=Magenta, R+G+B=Black)
             let r = if c { 0 } else { 255 };
             let g = if m { 0 } else { 255 };
             let b = if y_cmy { 0 } else { 255 };
-
-            // If all channels are on, force to white (preserves K channel)
-            let (r, g, b) = if c && m && y_cmy {
-                (255, 255, 255)
-            } else {
-                (r, g, b)
-            };
 
             output.put_pixel(x, y, Rgb([r, g, b]));
         }
@@ -240,13 +233,18 @@ pub fn combine_cmy_with_dithered_k(
             let new_val = if old_val > threshold { 1.0 } else { 0.0 };
             let error = old_val - new_val;
 
-            // If dithered to black, use K; otherwise use posterized CMY
-            if new_val < 0.5 {
-                output.put_pixel(x, y, Rgb([0, 0, 0]));
-            } else {
-                let cmy_color = posterized_cmy.get_pixel(x, y);
-                output.put_pixel(x, y, *cmy_color);
-            }
+            // Screen blend: 1 - (1 - dithered) * (1 - cmy)
+            // This prevents colors from getting too dark while preserving K
+            let cmy_color = posterized_cmy.get_pixel(x, y);
+            let cmy_r = cmy_color[0] as f64 / 255.0;
+            let cmy_g = cmy_color[1] as f64 / 255.0;
+            let cmy_b = cmy_color[2] as f64 / 255.0;
+
+            let r = (1.0 - (1.0 - new_val) * (1.0 - cmy_r)) * 255.0;
+            let g = (1.0 - (1.0 - new_val) * (1.0 - cmy_g)) * 255.0;
+            let b = (1.0 - (1.0 - new_val) * (1.0 - cmy_b)) * 255.0;
+
+            output.put_pixel(x, y, Rgb([r as u8, g as u8, b as u8]));
 
             // Distribute error using Floyd-Steinberg weights
             if x + 1 < width {
