@@ -174,8 +174,7 @@ impl ScoreLookup {
 
 /// Incremental scorer that uses static lookup table for O(1) pair score lookups
 pub struct IncrementalScorer {
-    size: usize,
-    positions: Vec<(usize, usize)>, // positions[val_idx] = (row, col) where that value is located
+    positions: Vec<usize>, // positions[val_idx] = flat position index where that value is located
     lookup: ScoreLookup,
 
     // Current total score with weights applied
@@ -187,11 +186,11 @@ pub struct IncrementalScorer {
 
 impl IncrementalScorer {
     /// Initialize scorer with starting positions
-    pub fn new(size: usize, positions: Vec<(usize, usize)>) -> Self {
+    pub fn new(size: usize, positions: Vec<usize>) -> Self {
         Self::new_with_sequence_weight(size, positions, 1.0)
     }
 
-    pub fn new_with_sequence_weight(size: usize, positions: Vec<(usize, usize)>, sequence_weight_strength: f64) -> Self {
+    pub fn new_with_sequence_weight(size: usize, positions: Vec<usize>, sequence_weight_strength: f64) -> Self {
         println!("Building static score lookup table (sequence_weight_strength={:.2})...", sequence_weight_strength);
         let lookup = ScoreLookup::new_with_sequence_weight(size, sequence_weight_strength);
         println!("Lookup table built: {} entries ({:.2} MB)",
@@ -199,7 +198,6 @@ impl IncrementalScorer {
                  (lookup.table.len() * std::mem::size_of::<f64>()) as f64 / 1024.0 / 1024.0);
 
         let mut scorer = IncrementalScorer {
-            size,
             positions,
             lookup,
             total_score: 0.0,
@@ -221,10 +219,8 @@ impl IncrementalScorer {
     /// Get score for a pair from the lookup table
     #[inline]
     fn get_pair_score(&self, val_idx1: usize, val_idx2: usize) -> f64 {
-        let (r1, c1) = self.positions[val_idx1];
-        let (r2, c2) = self.positions[val_idx2];
-        let pos_i = r1 * self.size + c1;
-        let pos_j = r2 * self.size + c2;
+        let pos_i = self.positions[val_idx1];
+        let pos_j = self.positions[val_idx2];
         self.lookup.get(val_idx1, val_idx2, pos_i, pos_j)
     }
 
@@ -296,29 +292,29 @@ pub fn toroidal_distance_component(a: usize, b: usize, size: usize) -> i32 {
 
 #[derive(Clone)]
 pub struct Kernel {
-    pub grid: Vec<f32>,
+    pub grid: Vec<f64>,
     pub size: usize,
 }
 
 impl Kernel {
-    pub fn new(size: usize, values: Vec<f32>) -> Self {
+    pub fn new(size: usize, values: Vec<f64>) -> Self {
         assert_eq!(values.len(), size * size, "Values must match grid size");
         Kernel { grid: values, size }
     }
 
-    pub fn get(&self, row: usize, col: usize) -> f32 {
+    pub fn get(&self, row: usize, col: usize) -> f64 {
         self.grid[row * self.size + col]
     }
 
-    pub fn set(&mut self, row: usize, col: usize, value: f32) {
+    pub fn set(&mut self, row: usize, col: usize, value: f64) {
         self.grid[row * self.size + col] = value;
     }
 
-    /// Build position map: value -> (row, col)
+    /// Build position map: value -> flat position index
     /// Values must be integers in range [1, n] where n = grid.len()
-    pub fn build_positions(&self) -> Vec<(usize, usize)> {
+    pub fn build_positions(&self) -> Vec<usize> {
         let n = self.grid.len();
-        let mut positions = vec![(0, 0); n];
+        let mut positions = vec![0; n];
         let mut seen = vec![false; n];
 
         for row in 0..self.size {
@@ -326,7 +322,7 @@ impl Kernel {
                 let value = self.get(row, col);
 
                 // Values must be 1-based integers: 1.0, 2.0, ..., n
-                assert!(value >= 1.0 && value <= n as f32 && value.fract() == 0.0,
+                assert!(value >= 1.0 && value <= n as f64 && value.fract() == 0.0,
                         "Grid values must be integers in range [1, {}], found {}", n, value);
 
                 let index = (value as usize) - 1;
@@ -334,7 +330,7 @@ impl Kernel {
                 assert!(!seen[index], "Duplicate value {} found in grid", value);
                 seen[index] = true;
 
-                positions[index] = (row, col);
+                positions[index] = row * self.size + col;
             }
         }
 
@@ -361,7 +357,7 @@ impl fmt::Display for Kernel {
 /// sequence_weight_strength: 0.0 = no sequence penalty, 1.0 = full 1/distance penalty (default)
 pub fn optimize_kernel(
     size: usize,
-    values: Vec<f32>,
+    values: Vec<f64>,
     iterations: usize,
     initial_temp: f64,
     cooling_rate: f64,
@@ -555,7 +551,7 @@ mod tests {
 
     #[test]
     fn test_4x4_optimization() {
-        let values: Vec<f32> = (1..=16).map(|x| x as f32).collect();
+        let values: Vec<f64> = (1..=16).map(|x| x as f64).collect();
         let kernel = optimize_kernel(4, values, 100_000, 0.0, 0.0, 12345, 1.0);
 
         println!("Optimized 4x4 arrangement:");
@@ -568,7 +564,7 @@ mod tests {
 
     #[test]
     fn test_manual_vs_auto_calibration() {
-        let values: Vec<f32> = (1..=16).map(|x| x as f32).collect();
+        let values: Vec<f64> = (1..=16).map(|x| x as f64).collect();
 
         println!("\n=== Manual parameters ===");
         let kernel1 = optimize_kernel(4, values.clone(), 50_000, 1.0, 0.9999, 12345, 1.0);
@@ -588,7 +584,7 @@ mod tests {
 
     #[test]
     fn test_sequence_weight_impact() {
-        let values: Vec<f32> = (1..=16).map(|x| x as f32).collect();
+        let values: Vec<f64> = (1..=16).map(|x| x as f64).collect();
 
         println!("\n=== No sequence weight (strength=0.0) ===");
         let kernel1 = optimize_kernel(4, values.clone(), 50_000, 0.0, 0.0, 12345, 0.0);

@@ -150,8 +150,8 @@ impl ThresholdKernel {
         let total = size * size;
 
         // Generate evenly distributed values (1..N)
-        let values: Vec<f32> = (1..=total)
-            .map(|i| i as f32)
+        let values: Vec<f64> = (1..=total)
+            .map(|i| i as f64)
             .collect();
 
         // Determine iteration counts based on size
@@ -177,7 +177,7 @@ impl ThresholdKernel {
         // Convert from 1..N to 0..1 range
         let normalized: Vec<f32> = optimized_kernel.grid
             .iter()
-            .map(|&v| v / (total + 1) as f32)
+            .map(|&v| (v / (total + 1) as f64) as f32)
             .collect();
 
         Self::new(width, height, normalized)
