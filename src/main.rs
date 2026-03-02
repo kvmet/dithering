@@ -14,7 +14,7 @@ use filters::{
     save_as_1bit_png, save_as_color_png,
     ThresholdKernel,
 };
-use posterize::posterize_cmyk_dithered;
+use posterize::posterize_cmy_spread;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 #[derive(Parser)]
@@ -97,9 +97,9 @@ struct Cli {
     #[arg(short = 'H', long, value_name = "PIXELS", help = "Target height in pixels")]
     height: Option<u32>,
 
-    /// Blur radius for posterize mode (creates larger color blocks)
-    #[arg(long, value_name = "FLOAT", default_value = "3.0", help = "Blur radius for posterize mode")]
-    blur_radius: f32,
+    /// Spread radius for posterize mode (grows CMY color areas)
+    #[arg(long, value_name = "PIXELS", default_value = "3", help = "Spread radius for posterize mode (pixels)")]
+    spread_radius: u32,
 }
 
 fn main() {
@@ -433,10 +433,10 @@ fn main() {
         }
         "posterize" => {
             println!(
-                "Processing {} with {} kernel (posterize mode, blur={:.1}, gamma={:.2})...",
-                cli.input, cli.kernel, cli.blur_radius, gamma
+                "Processing {} with {} kernel (posterize mode, spread={}, gamma={:.2})...",
+                cli.input, cli.kernel, cli.spread_radius, gamma
             );
-            let output = posterize_cmyk_dithered(&img, &kernel, cli.blur_radius, gamma);
+            let output = posterize_cmy_spread(&img, &kernel, cli.spread_radius, gamma);
             save_as_color_png(&output, &cli.output).unwrap_or_else(|e| {
                 eprintln!("Failed to save color PNG '{}': {}", cli.output, e);
                 std::process::exit(1);
