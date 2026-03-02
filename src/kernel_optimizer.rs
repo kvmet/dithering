@@ -12,6 +12,9 @@ struct IncrementalScorer {
 
     // Current total score with weights applied
     total_score: f32,
+
+    // Store old score for efficient undo
+    old_score: f32,
 }
 
 impl IncrementalScorer {
@@ -21,6 +24,7 @@ impl IncrementalScorer {
             size,
             positions,
             total_score: 0.0,
+            old_score: 0.0,
         };
 
         // Calculate initial score
@@ -35,64 +39,51 @@ impl IncrementalScorer {
         self.total_score
     }
 
-    /// Calculate score contribution for a single value index with weights applied
+    /// Calculate score for a single pair of values
     #[inline]
-    fn calculate_score_for_value(&self, val_idx: usize) -> f32 {
-        let mut score = 0.0;
+    fn calculate_pair_score(&self, val_idx1: usize, val_idx2: usize) -> f32 {
+        let (r1, c1) = self.positions[val_idx1];
+        let (r2, c2) = self.positions[val_idx2];
 
-        let (r1, c1) = self.positions[val_idx];
+        // Calculate wrapped distance squared (toroidal)
+        let dr = toroidal_distance_component(r1, r2, self.size);
+        let dc = toroidal_distance_component(c1, c2, self.size);
+        let distance_sq = (dr * dr + dc * dc) as f32;
 
-        for other_idx in 0..self.positions.len() {
-            if other_idx == val_idx {
-                continue;
-            }
+        // Determine which index is smaller for consistent weighting
+        let (i, j) = if val_idx1 < val_idx2 {
+            (val_idx1, val_idx2)
+        } else {
+            (val_idx2, val_idx1)
+        };
 
-            let (r2, c2) = self.positions[other_idx];
+        // Weight by sequence distance (closer in sequence = more important)
+        let sequence_distance = (j - i) as f32;
+        let sequence_weight = 1.0 / sequence_distance;
 
-            // Calculate wrapped distance squared (toroidal)
-            let dr = toroidal_distance_component(r1, r2, self.size);
-            let dc = toroidal_distance_component(c1, c2, self.size);
-            let distance_sq = (dr * dr + dc * dc) as f32;
+        // Weight by position (early transitions more visible than late)
+        let position_weight = 1.0 / ((i + 1) as f32).sqrt();
 
-            // Determine which index is smaller for consistent weighting
-            let (i, j) = if val_idx < other_idx {
-                (val_idx, other_idx)
-            } else {
-                (other_idx, val_idx)
-            };
+        let combined_weight = sequence_weight * position_weight;
 
-            // Weight by sequence distance (closer in sequence = more important)
-            let sequence_distance = (j - i) as f32;
-            let sequence_weight = 1.0 / sequence_distance;
+        // Distance contribution weighted by combined weight
+        let weighted_distance = distance_sq * combined_weight;
 
-            // Weight by position (early transitions more visible than late)
-            let position_weight = 1.0 / ((i + 1) as f32).sqrt();
+        // Branchless weight selection using boolean arithmetic
+        let is_vertical = (c1 == c2) as i32 as f32;
+        let is_horizontal = (r1 == r2) as i32 as f32;
+        let is_pos_diagonal = (dr == dc) as i32 as f32;
+        let is_neg_diagonal = (dr == -dc) as i32 as f32;
 
-            let combined_weight = sequence_weight * position_weight;
+        // Only one of these can be 1.0, rest are 0.0
+        // If none match, the sum is 0.0 and we use OTHER_WEIGHT
+        let weight = is_vertical * VERTICAL_WEIGHT
+            + is_horizontal * HORIZONTAL_WEIGHT
+            + is_pos_diagonal * POSITIVE_DIAGONAL_WEIGHT
+            + is_neg_diagonal * NEGATIVE_DIAGONAL_WEIGHT
+            + (1.0 - is_vertical - is_horizontal - is_pos_diagonal - is_neg_diagonal) * OTHER_WEIGHT;
 
-            // Distance contribution weighted by combined weight
-            let weighted_distance = distance_sq * combined_weight;
-
-            // Classify by geometric relationship and apply weight
-            if c1 == c2 {
-                // Same column (vertical alignment)
-                score += VERTICAL_WEIGHT * weighted_distance;
-            } else if r1 == r2 {
-                // Same row (horizontal alignment)
-                score += HORIZONTAL_WEIGHT * weighted_distance;
-            } else if dr == dc {
-                // Positive diagonal (slope = 1)
-                score += POSITIVE_DIAGONAL_WEIGHT * weighted_distance;
-            } else if dr == -dc {
-                // Negative diagonal (slope = -1)
-                score += NEGATIVE_DIAGONAL_WEIGHT * weighted_distance;
-            } else {
-                // Everything else
-                score += OTHER_WEIGHT * weighted_distance;
-            }
-        }
-
-        score
+        weight * weighted_distance
     }
 
     /// Calculate full score (used for initialization)
@@ -115,18 +106,19 @@ impl IncrementalScorer {
 
                 let weighted_distance = distance_sq * combined_weight;
 
-                // Classify by geometric relationship and apply weight
-                if c1 == c2 {
-                    total += VERTICAL_WEIGHT * weighted_distance;
-                } else if r1 == r2 {
-                    total += HORIZONTAL_WEIGHT * weighted_distance;
-                } else if dr == dc {
-                    total += POSITIVE_DIAGONAL_WEIGHT * weighted_distance;
-                } else if dr == -dc {
-                    total += NEGATIVE_DIAGONAL_WEIGHT * weighted_distance;
-                } else {
-                    total += OTHER_WEIGHT * weighted_distance;
-                }
+                // Branchless weight selection using boolean arithmetic
+                let is_vertical = (c1 == c2) as i32 as f32;
+                let is_horizontal = (r1 == r2) as i32 as f32;
+                let is_pos_diagonal = (dr == dc) as i32 as f32;
+                let is_neg_diagonal = (dr == -dc) as i32 as f32;
+
+                let weight = is_vertical * VERTICAL_WEIGHT
+                    + is_horizontal * HORIZONTAL_WEIGHT
+                    + is_pos_diagonal * POSITIVE_DIAGONAL_WEIGHT
+                    + is_neg_diagonal * NEGATIVE_DIAGONAL_WEIGHT
+                    + (1.0 - is_vertical - is_horizontal - is_pos_diagonal - is_neg_diagonal) * OTHER_WEIGHT;
+
+                total += weight * weighted_distance;
             }
         }
 
@@ -136,31 +128,55 @@ impl IncrementalScorer {
     /// Update score incrementally after swapping two value indices
     /// val_idx1 and val_idx2 are the VALUE indices (0-based, from the positions array)
     fn update_after_swap(&mut self, val_idx1: usize, val_idx2: usize) {
-        // Subtract out old contributions from both values
-        let old_contribution1 = self.calculate_score_for_value(val_idx1);
-        let old_contribution2 = self.calculate_score_for_value(val_idx2);
+        // Save old score for potential undo
+        self.old_score = self.total_score;
+
+        // Calculate old pair scores (before swap)
+        let mut old_pairs_sum = 0.0;
+        let mut new_pairs_sum = 0.0;
+
+        // Only recalculate pairs involving val_idx1 or val_idx2
+        for other_idx in 0..self.positions.len() {
+            if other_idx == val_idx1 || other_idx == val_idx2 {
+                continue;
+            }
+
+            // Old scores (before swap)
+            old_pairs_sum += self.calculate_pair_score(val_idx1, other_idx);
+            old_pairs_sum += self.calculate_pair_score(val_idx2, other_idx);
+        }
+
+        // Also include the pair between val_idx1 and val_idx2
+        old_pairs_sum += self.calculate_pair_score(val_idx1, val_idx2);
 
         // Swap positions
         self.positions.swap(val_idx1, val_idx2);
 
-        // Add back new contributions
-        let new_contribution1 = self.calculate_score_for_value(val_idx1);
-        let new_contribution2 = self.calculate_score_for_value(val_idx2);
+        // Calculate new pair scores (after swap)
+        for other_idx in 0..self.positions.len() {
+            if other_idx == val_idx1 || other_idx == val_idx2 {
+                continue;
+            }
 
-        // Update score
-        // Note: we divide by 2 because each pair is counted twice (once from each value's perspective)
-        self.total_score = self.total_score
-            - old_contribution1 / 2.0
-            - old_contribution2 / 2.0
-            + new_contribution1 / 2.0
-            + new_contribution2 / 2.0;
+            // New scores (after swap)
+            new_pairs_sum += self.calculate_pair_score(val_idx1, other_idx);
+            new_pairs_sum += self.calculate_pair_score(val_idx2, other_idx);
+        }
+
+        // Also include the pair between val_idx1 and val_idx2
+        new_pairs_sum += self.calculate_pair_score(val_idx1, val_idx2);
+
+        // Update total score by replacing old pair scores with new ones
+        self.total_score = self.total_score - old_pairs_sum + new_pairs_sum;
     }
 
     /// Undo a swap (used when rejecting a move)
     fn undo_swap(&mut self, val_idx1: usize, val_idx2: usize) {
-        // Just swap back and recalculate
-        // We could be smarter here but swaps are cheap
-        self.update_after_swap(val_idx1, val_idx2);
+        // Swap positions back
+        self.positions.swap(val_idx1, val_idx2);
+
+        // Restore old score (much faster than recalculating)
+        self.total_score = self.old_score;
     }
 }
 
