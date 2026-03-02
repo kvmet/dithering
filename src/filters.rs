@@ -3,6 +3,7 @@ use png::{BitDepth, ColorType, Encoder};
 use std::fs::File;
 use std::io::{self, BufWriter};
 use std::path::Path;
+use crate::kernel_expander;
 
 
 /// Convert sRGB value to linear light (gamma expansion)
@@ -504,20 +505,20 @@ pub fn apply_threshold_kernel_normalized_perceptual_color_exclusive(img: &Dynami
 
 /// Apply threshold kernel dithering to a color image using CMYK mode
 ///
-/// Only allows pure single channels (C, M, Y) or black (all three off) or white (all three on).
-/// Uses inverted RGB logic: picks strongest channel and inverts it.
+/// Uses expanded kernels - each channel (C, M, Y, K) gets a different kernel derived from the root.
+/// This minimizes spatial overlap between channels, reducing artifacts.
 /// Creates only 5 colors: cyan, magenta, yellow, black, white
 pub fn apply_threshold_kernel_perceptual_color_cmyk(img: &DynamicImage, kernel: &ThresholdKernel, gamma: f32) -> RgbImage {
-    apply_threshold_kernel_color_internal(img, kernel, ColorMode::Cmyk, false, gamma)
+    apply_threshold_kernel_cmyk_direct(img, kernel, gamma)
 }
 
 /// Apply threshold kernel dithering to a color image using CMYK mode with normalization
 ///
-/// Only allows pure single channels (C, M, Y) or black (all three off) or white (all three on).
-/// Uses inverted RGB logic: picks strongest channel and inverts it.
+/// Uses expanded kernels - each channel (C, M, Y, K) gets a different kernel derived from the root.
+/// This minimizes spatial overlap between channels, reducing artifacts.
 /// Creates only 5 colors: cyan, magenta, yellow, black, white
 pub fn apply_threshold_kernel_normalized_perceptual_color_cmyk(img: &DynamicImage, kernel: &ThresholdKernel, gamma: f32) -> RgbImage {
-    apply_threshold_kernel_color_internal(img, kernel, ColorMode::Cmyk, true, gamma)
+    apply_threshold_kernel_cmyk_normalized(img, kernel, gamma)
 }
 
 enum ColorMode {
@@ -763,6 +764,194 @@ fn apply_threshold_kernel_color_normalized_internal(img: &DynamicImage, kernel: 
                     }
                 }
             }
+
+            output.put_pixel(x, y, Rgb([r_out, g_out, b_out]));
+        }
+    }
+
+    output
+}
+
+/// Apply CMYK dithering using expanded kernels (direct, no normalization)
+fn apply_threshold_kernel_cmyk_direct(img: &DynamicImage, kernel: &ThresholdKernel, gamma: f32) -> RgbImage {
+    let rgb = img.to_rgb8();
+    let (width, height) = rgb.dimensions();
+
+    // Expand the root kernel into CMYK kernels
+    let cmyk_kernels = kernel_expander::expand_kernel_cmyk(&kernel.values, kernel.width);
+
+    let mut output = RgbImage::new(width, height);
+
+    for y in 0..height {
+        for x in 0..width {
+            let pixel = rgb.get_pixel(x, y);
+
+            // Apply gamma correction first (in encoded space)
+            let mut r = (pixel[0] as f32 / 255.0).powf(gamma);
+            let mut g = (pixel[1] as f32 / 255.0).powf(gamma);
+            let mut b = (pixel[2] as f32 / 255.0).powf(gamma);
+
+            r = srgb_to_linear(r);
+            g = srgb_to_linear(g);
+            b = srgb_to_linear(b);
+
+            // Tile the kernel across the image
+            let kx = (x as usize) % kernel.width;
+            let ky = (y as usize) % kernel.height;
+            let kid = ky * kernel.width + kx;
+
+            // Get thresholds from each channel's kernel
+            let threshold_c = cmyk_kernels.cyan[kid];
+            let threshold_m = cmyk_kernels.magenta[kid];
+            let threshold_y = cmyk_kernels.yellow[kid];
+            let threshold_k = cmyk_kernels.black[kid];
+
+            // Determine which channel wins based on color values
+            // CMY is inverted from RGB, and K is for when all are low
+            let cyan_strength = 1.0 - r;      // lack of red
+            let magenta_strength = 1.0 - g;   // lack of green
+            let yellow_strength = 1.0 - b;    // lack of blue
+            let black_strength = 1.0 - r.max(g).max(b);  // lack of brightness
+
+            // Check which channels activate at this position
+            let c_on = cyan_strength > threshold_c;
+            let m_on = magenta_strength > threshold_m;
+            let y_on = yellow_strength > threshold_y;
+            let k_on = black_strength > threshold_k;
+
+            let (r_out, g_out, b_out) = if k_on {
+                // Black wins
+                (0, 0, 0)
+            } else if !c_on && !m_on && !y_on {
+                // Nothing activated = white
+                (255, 255, 255)
+            } else {
+                // Determine winner among CMY channels
+                let max_strength = cyan_strength.max(magenta_strength).max(yellow_strength);
+
+                if cyan_strength == max_strength && c_on {
+                    (0, 255, 255)  // Cyan
+                } else if magenta_strength == max_strength && m_on {
+                    (255, 0, 255)  // Magenta
+                } else if yellow_strength == max_strength && y_on {
+                    (255, 255, 0)  // Yellow
+                } else {
+                    // Fallback to white if nothing wins
+                    (255, 255, 255)
+                }
+            };
+
+            output.put_pixel(x, y, Rgb([r_out, g_out, b_out]));
+        }
+    }
+
+    output
+}
+
+/// Apply CMYK dithering using expanded kernels (with normalization)
+fn apply_threshold_kernel_cmyk_normalized(img: &DynamicImage, kernel: &ThresholdKernel, gamma: f32) -> RgbImage {
+    let rgb = img.to_rgb8();
+    let (width, height) = rgb.dimensions();
+
+    // Expand the root kernel into CMYK kernels
+    let cmyk_kernels = kernel_expander::expand_kernel_cmyk(&kernel.values, kernel.width);
+
+    // Collect CMY and K values for normalization
+    let mut cyan_values: Vec<f32> = Vec::with_capacity((width * height) as usize);
+    let mut magenta_values: Vec<f32> = Vec::with_capacity((width * height) as usize);
+    let mut yellow_values: Vec<f32> = Vec::with_capacity((width * height) as usize);
+    let mut black_values: Vec<f32> = Vec::with_capacity((width * height) as usize);
+
+    for y in 0..height {
+        for x in 0..width {
+            let pixel = rgb.get_pixel(x, y);
+
+            let mut r = (pixel[0] as f32 / 255.0).powf(gamma);
+            let mut g = (pixel[1] as f32 / 255.0).powf(gamma);
+            let mut b = (pixel[2] as f32 / 255.0).powf(gamma);
+
+            r = srgb_to_linear(r);
+            g = srgb_to_linear(g);
+            b = srgb_to_linear(b);
+
+            cyan_values.push(1.0 - r);
+            magenta_values.push(1.0 - g);
+            yellow_values.push(1.0 - b);
+            black_values.push(1.0 - r.max(g).max(b));
+        }
+    }
+
+    // Sort for percentile calculation
+    cyan_values.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    magenta_values.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    yellow_values.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    black_values.sort_by(|a, b| a.partial_cmp(b).unwrap());
+
+    let total_pixels = (width * height) as usize;
+
+    let mut output = RgbImage::new(width, height);
+
+    for y in 0..height {
+        for x in 0..width {
+            let pixel = rgb.get_pixel(x, y);
+
+            let mut r = (pixel[0] as f32 / 255.0).powf(gamma);
+            let mut g = (pixel[1] as f32 / 255.0).powf(gamma);
+            let mut b = (pixel[2] as f32 / 255.0).powf(gamma);
+
+            r = srgb_to_linear(r);
+            g = srgb_to_linear(g);
+            b = srgb_to_linear(b);
+
+            let cyan_strength = 1.0 - r;
+            let magenta_strength = 1.0 - g;
+            let yellow_strength = 1.0 - b;
+            let black_strength = 1.0 - r.max(g).max(b);
+
+            // Calculate percentiles
+            let c_percentile = cyan_values.partition_point(|&v| v < cyan_strength) as f32 / total_pixels as f32;
+            let m_percentile = magenta_values.partition_point(|&v| v < magenta_strength) as f32 / total_pixels as f32;
+            let y_percentile = yellow_values.partition_point(|&v| v < yellow_strength) as f32 / total_pixels as f32;
+            let k_percentile = black_values.partition_point(|&v| v < black_strength) as f32 / total_pixels as f32;
+
+            // Tile the kernel across the image
+            let kx = (x as usize) % kernel.width;
+            let ky = (y as usize) % kernel.height;
+            let kid = ky * kernel.width + kx;
+
+            // Get thresholds from each channel's kernel
+            let threshold_c = cmyk_kernels.cyan[kid];
+            let threshold_m = cmyk_kernels.magenta[kid];
+            let threshold_y = cmyk_kernels.yellow[kid];
+            let threshold_k = cmyk_kernels.black[kid];
+
+            // Check which channels activate
+            let c_on = c_percentile > threshold_c;
+            let m_on = m_percentile > threshold_m;
+            let y_on = y_percentile > threshold_y;
+            let k_on = k_percentile > threshold_k;
+
+            let (r_out, g_out, b_out) = if k_on {
+                // Black wins
+                (0, 0, 0)
+            } else if !c_on && !m_on && !y_on {
+                // Nothing activated = white
+                (255, 255, 255)
+            } else {
+                // Determine winner among CMY channels
+                let max_strength = cyan_strength.max(magenta_strength).max(yellow_strength);
+
+                if cyan_strength == max_strength && c_on {
+                    (0, 255, 255)  // Cyan
+                } else if magenta_strength == max_strength && m_on {
+                    (255, 0, 255)  // Magenta
+                } else if yellow_strength == max_strength && y_on {
+                    (255, 255, 0)  // Yellow
+                } else {
+                    // Fallback to white if nothing wins
+                    (255, 255, 255)
+                }
+            };
 
             output.put_pixel(x, y, Rgb([r_out, g_out, b_out]));
         }

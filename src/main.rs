@@ -1,5 +1,6 @@
 mod filters;
 mod kernel_optimizer;
+mod kernel_expander;
 
 use clap::Parser;
 use filters::{
