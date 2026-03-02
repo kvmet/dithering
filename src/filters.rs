@@ -34,20 +34,20 @@ fn linear_to_srgb(value: f32) -> f32 {
 pub struct ThresholdKernel {
     pub width: usize,
     pub height: usize,
-    pub values: Vec<f32>,
+    pub values: Vec<f64>,
 }
 
 impl ThresholdKernel {
     /// Create a new threshold kernel with the given dimensions and values
     ///
     /// Values should be in the range [0.0, 1.0]
-    pub fn new(width: usize, height: usize, values: Vec<f32>) -> Self {
+    pub fn new(width: usize, height: usize, values: Vec<f64>) -> Self {
         assert_eq!(width * height, values.len(), "Kernel dimensions don't match values length");
         Self { width, height, values }
     }
 
     /// Get the threshold value at position (x, y) in the kernel
-    pub fn get(&self, x: usize, y: usize) -> f32 {
+    pub fn get(&self, x: usize, y: usize) -> f64 {
         self.values[y * self.width + x]
     }
 
@@ -60,8 +60,8 @@ impl ThresholdKernel {
         let total = width * height;
 
         // Generate evenly distributed values
-        let mut values: Vec<f32> = (0..total)
-            .map(|i| (i + 1) as f32 / (total + 1) as f32)
+        let mut values: Vec<f64> = (0..total)
+            .map(|i| (i + 1) as f64 / (total + 1) as f64)
             .collect();
 
         // Deterministic shuffle using a simple LCG (Linear Congruential Generator)
@@ -85,8 +85,8 @@ impl ThresholdKernel {
         let total = width * height;
 
         // Generate evenly distributed values (same as discrete version)
-        let mut values: Vec<f32> = (0..total)
-            .map(|i| (i + 1) as f32 / (total + 1) as f32)
+        let mut values: Vec<f64> = (0..total)
+            .map(|i| (i + 1) as f64 / (total + 1) as f64)
             .collect();
 
         // Create a smooth shuffle using seed-controlled swap interpolation
@@ -175,9 +175,9 @@ impl ThresholdKernel {
         );
 
         // Convert from 1..N to 0..1 range
-        let normalized: Vec<f32> = optimized_kernel.grid
+        let normalized: Vec<f64> = optimized_kernel.grid
             .iter()
-            .map(|&v| (v / (total + 1) as f64) as f32)
+            .map(|&v| v / (total + 1) as f64)
             .collect();
 
         Self::new(width, height, normalized)
@@ -267,7 +267,7 @@ fn apply_threshold_kernel_direct(img: &DynamicImage, kernel: &ThresholdKernel, p
             // Tile the kernel across the image
             let kx = (x as usize) % kernel.width;
             let ky = (y as usize) % kernel.height;
-            let threshold = kernel.get(kx, ky);
+            let threshold = kernel.get(kx, ky) as f32;
 
             // Apply threshold
             let output_value = if brightness > threshold { 255 } else { 0 };
@@ -329,7 +329,7 @@ fn apply_threshold_kernel_normalized_internal(img: &DynamicImage, kernel: &Thres
             // Tile the kernel across the image
             let kx = (x as usize) % kernel.width;
             let ky = (y as usize) % kernel.height;
-            let threshold = kernel.get(kx, ky);
+            let threshold = kernel.get(kx, ky) as f32;
 
             // Compare percentile to threshold
             let output_value = if percentile > threshold { 255 } else { 0 };
@@ -430,7 +430,7 @@ fn estimate_output_mean(img: &DynamicImage, kernel: &ThresholdKernel, perceptual
 
             let kx = (x as usize) % kernel.width;
             let ky = (y as usize) % kernel.height;
-            let threshold = kernel.get(kx, ky);
+            let threshold = kernel.get(kx, ky) as f32;
 
             if brightness > threshold {
                 white_pixels += 1.0;
@@ -561,9 +561,8 @@ fn apply_threshold_kernel_color_direct(img: &DynamicImage, kernel: &ThresholdKer
             // Tile the kernel across the image
             let kx = (x as usize) % kernel.width;
             let ky = (y as usize) % kernel.height;
-            let threshold = kernel.get(kx, ky);
+            let threshold = kernel.get(kx, ky) as f32;
 
-            // Apply threshold to each channel independently
             let mut r_out = if r > threshold { 255 } else { 0 };
             let mut g_out = if g > threshold { 255 } else { 0 };
             let mut b_out = if b > threshold { 255 } else { 0 };
@@ -697,9 +696,8 @@ fn apply_threshold_kernel_color_normalized_internal(img: &DynamicImage, kernel: 
             // Tile the kernel across the image
             let kx = (x as usize) % kernel.width;
             let ky = (y as usize) % kernel.height;
-            let threshold = kernel.get(kx, ky);
+            let threshold = kernel.get(kx, ky) as f32;
 
-            // Apply threshold to each channel independently
             let mut r_out = if r_percentile > threshold { 255 } else { 0 };
             let mut g_out = if g_percentile > threshold { 255 } else { 0 };
             let mut b_out = if b_percentile > threshold { 255 } else { 0 };
@@ -803,10 +801,10 @@ fn apply_threshold_kernel_cmyk_direct(img: &DynamicImage, kernel: &ThresholdKern
             let kid = ky * kernel.width + kx;
 
             // Get thresholds from each channel's kernel
-            let threshold_c = cmyk_kernels.cyan[kid];
-            let threshold_m = cmyk_kernels.magenta[kid];
-            let threshold_y = cmyk_kernels.yellow[kid];
-            let threshold_k = cmyk_kernels.black[kid];
+            let threshold_c = cmyk_kernels.cyan[kid] as f32;
+            let threshold_m = cmyk_kernels.magenta[kid] as f32;
+            let threshold_y = cmyk_kernels.yellow[kid] as f32;
+            let threshold_k = cmyk_kernels.black[kid] as f32;
 
             // Determine which channel wins based on color values
             // CMY is inverted from RGB, and K is for when all are low
@@ -922,10 +920,10 @@ fn apply_threshold_kernel_cmyk_normalized(img: &DynamicImage, kernel: &Threshold
             let kid = ky * kernel.width + kx;
 
             // Get thresholds from each channel's kernel
-            let threshold_c = cmyk_kernels.cyan[kid];
-            let threshold_m = cmyk_kernels.magenta[kid];
-            let threshold_y = cmyk_kernels.yellow[kid];
-            let threshold_k = cmyk_kernels.black[kid];
+            let threshold_c = cmyk_kernels.cyan[kid] as f32;
+            let threshold_m = cmyk_kernels.magenta[kid] as f32;
+            let threshold_y = cmyk_kernels.yellow[kid] as f32;
+            let threshold_k = cmyk_kernels.black[kid] as f32;
 
             // Check which channels activate
             let c_on = c_percentile > threshold_c;

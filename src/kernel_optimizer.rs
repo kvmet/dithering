@@ -11,7 +11,7 @@ const VERTICAL_WEIGHT: f64 = 0.2;            // Weight for vertical (same column
 const HORIZONTAL_WEIGHT: f64 = 0.2;          // Weight for horizontal (same row) alignments - BAD
 const POSITIVE_DIAGONAL_WEIGHT: f64 = 0.3;   // Weight for positive diagonal (slope = 1) - LESS BAD
 const NEGATIVE_DIAGONAL_WEIGHT: f64 = 0.3;   // Weight for negative diagonal (slope = -1) - LESS BAD
-const KNIGHT_WEIGHT: f64 = 0.5;              // Weight for knight move patterns (2,1 or 1,2) - MEDIUM
+const KNIGHT_WEIGHT: f64 = 0.4;              // Weight for knight move patterns (2,1 or 1,2) - MEDIUM
 const OTHER_WEIGHT: f64 = 1.0;               // Weight for all other geometric relationships - GOOD
 
 // Linear Congruential Generator (LCG) constants

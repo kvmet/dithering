@@ -6,16 +6,16 @@
 
 /// Represents a set of CMYK kernels derived from a root kernel
 pub struct CmykKernels {
-    pub cyan: Vec<f32>,
-    pub magenta: Vec<f32>,
-    pub yellow: Vec<f32>,
-    pub black: Vec<f32>,
+    pub cyan: Vec<f64>,
+    pub magenta: Vec<f64>,
+    pub yellow: Vec<f64>,
+    pub black: Vec<f64>,
     pub size: usize,
 }
 
 impl CmykKernels {
     /// Get the kernel for a specific channel
-    pub fn get_channel(&self, channel: usize) -> &[f32] {
+    pub fn get_channel(&self, channel: usize) -> &[f64] {
         match channel {
             0 => &self.cyan,
             1 => &self.magenta,
@@ -32,13 +32,13 @@ impl CmykKernels {
 /// - Each kernel gets every 4th threshold value
 /// - Rotate which values each channel gets to minimize spatial overlap
 /// - Use spatial distribution to ensure different channels activate at different positions
-pub fn expand_kernel_cmyk(root_kernel: &[f32], size: usize) -> CmykKernels {
+pub fn expand_kernel_cmyk(root_kernel: &[f64], size: usize) -> CmykKernels {
     assert_eq!(root_kernel.len(), size * size, "Root kernel must match size");
 
     let n = root_kernel.len();
 
     // Build index map: for each threshold value, where is it in the grid?
-    let mut value_positions: Vec<(f32, usize)> = root_kernel
+    let mut value_positions: Vec<(f64, usize)> = root_kernel
         .iter()
         .enumerate()
         .map(|(idx, &val)| (val, idx))
@@ -48,10 +48,10 @@ pub fn expand_kernel_cmyk(root_kernel: &[f32], size: usize) -> CmykKernels {
     value_positions.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
 
     // Initialize output kernels with maximum values (so unused positions never activate)
-    let mut cyan = vec![1.0; n];
-    let mut magenta = vec![1.0; n];
-    let mut yellow = vec![1.0; n];
-    let mut black = vec![1.0; n];
+    let mut cyan: Vec<f64> = vec![1.0; n];
+    let mut magenta: Vec<f64> = vec![1.0; n];
+    let mut yellow: Vec<f64> = vec![1.0; n];
+    let mut black: Vec<f64> = vec![1.0; n];
 
     // Distribute values among channels
     // Each channel gets every 4th value, but offset by rotation
@@ -61,7 +61,7 @@ pub fn expand_kernel_cmyk(root_kernel: &[f32], size: usize) -> CmykKernels {
     for (rank, &(_value, position)) in value_positions.iter().enumerate() {
         let channel = rank % 4;
         let channel_rank = rank / 4;
-        let channel_normalized = (channel_rank as f32) / ((n / 4) as f32 + 0.5);
+        let channel_normalized = (channel_rank as f64) / ((n / 4) as f64 + 0.5);
 
         match channel {
             0 => cyan[position] = channel_normalized,
@@ -83,13 +83,13 @@ pub fn expand_kernel_cmyk(root_kernel: &[f32], size: usize) -> CmykKernels {
 
 /// Expand kernel with rotation strategy to minimize spatial clustering
 /// This version rotates the assignment pattern to spread out activations
-pub fn expand_kernel_cmyk_rotated(root_kernel: &[f32], size: usize) -> CmykKernels {
+pub fn expand_kernel_cmyk_rotated(root_kernel: &[f64], size: usize) -> CmykKernels {
     assert_eq!(root_kernel.len(), size * size, "Root kernel must match size");
 
     let n = root_kernel.len();
 
     // Build sorted list of (value, row, col)
-    let mut value_positions: Vec<(f32, usize, usize)> = Vec::new();
+    let mut value_positions: Vec<(f64, usize, usize)> = Vec::new();
     for row in 0..size {
         for col in 0..size {
             let idx = row * size + col;
@@ -98,10 +98,11 @@ pub fn expand_kernel_cmyk_rotated(root_kernel: &[f32], size: usize) -> CmykKerne
     }
     value_positions.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
 
-    let mut cyan = vec![1.0; n];
-    let mut magenta = vec![1.0; n];
-    let mut yellow = vec![1.0; n];
-    let mut black = vec![1.0; n];
+    // Initialize output kernels
+    let mut cyan: Vec<f64> = vec![1.0; n];
+    let mut magenta: Vec<f64> = vec![1.0; n];
+    let mut yellow: Vec<f64> = vec![1.0; n];
+    let mut black: Vec<f64> = vec![1.0; n];
 
     // Assign based on position in grid to add spatial diversity
     for (rank, &(_value, row, col)) in value_positions.iter().enumerate() {
@@ -113,7 +114,7 @@ pub fn expand_kernel_cmyk_rotated(root_kernel: &[f32], size: usize) -> CmykKerne
         let channel = (rank + spatial_offset) % 4;
 
         let channel_rank = rank / 4;
-        let channel_normalized = (channel_rank as f32) / ((n / 4) as f32 + 0.5);
+        let channel_normalized = (channel_rank as f64) / ((n / 4) as f64 + 0.5);
 
         match channel {
             0 => cyan[position] = channel_normalized,
