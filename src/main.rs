@@ -1,6 +1,7 @@
 mod filters;
 mod kernel_optimizer;
 mod kernel_expander;
+mod posterize;
 
 use clap::Parser;
 use filters::{
@@ -10,10 +11,10 @@ use filters::{
     apply_threshold_kernel_perceptual_color_dominant,
     apply_threshold_kernel_normalized_perceptual_color_exclusive,
     apply_threshold_kernel_perceptual_color_exclusive,
-    apply_threshold_kernel_normalized_perceptual_color_cmyk,
-    apply_threshold_kernel_perceptual_color_cmyk, save_as_1bit_png, save_as_color_png,
+    save_as_1bit_png, save_as_color_png,
     ThresholdKernel,
 };
+use posterize::posterize_cmyk_dithered;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 #[derive(Parser)]
@@ -34,7 +35,7 @@ struct Cli {
         long,
         value_name = "MODE",
         default_value = "bw",
-        help = "Color mode: bw, color, dominant, exclusive, cmyk"
+        help = "Color mode: bw, color, dominant, exclusive, posterize"
     )]
     mode: String,
 
@@ -95,6 +96,10 @@ struct Cli {
     /// Target height (scales width proportionally if width not specified)
     #[arg(short = 'H', long, value_name = "PIXELS", help = "Target height in pixels")]
     height: Option<u32>,
+
+    /// Blur radius for posterize mode (creates larger color blocks)
+    #[arg(long, value_name = "FLOAT", default_value = "3.0", help = "Blur radius for posterize mode")]
+    blur_radius: f32,
 }
 
 fn main() {
@@ -426,39 +431,25 @@ fn main() {
             println!("Input mean: {:.3}, Output mean: {:.3} (gamma: {:.3})", input_mean, output_mean, gamma);
             println!("Saved 1-bit PNG to {}", cli.output);
         }
-        "cmyk" => {
-            if cli.normalize {
-                println!(
-                    "Processing {} with {} kernel (CMYK mode, normalized + perceptual, gamma={:.2})...",
-                    cli.input, cli.kernel, gamma
-                );
-                let output =
-                    apply_threshold_kernel_normalized_perceptual_color_cmyk(&img, &kernel, gamma);
-                save_as_color_png(&output, &cli.output).unwrap_or_else(|e| {
-                    eprintln!("Failed to save color PNG '{}': {}", cli.output, e);
-                    std::process::exit(1);
-                });
-            } else {
-                println!(
-                    "Processing {} with {} kernel (CMYK mode, perceptual, gamma={:.2})...",
-                    cli.input, cli.kernel, gamma
-                );
-                let output =
-                    apply_threshold_kernel_perceptual_color_cmyk(&img, &kernel, gamma);
-                save_as_color_png(&output, &cli.output).unwrap_or_else(|e| {
-                    eprintln!("Failed to save color PNG '{}': {}", cli.output, e);
-                    std::process::exit(1);
-                });
-            }
+        "posterize" => {
+            println!(
+                "Processing {} with {} kernel (posterize mode, blur={:.1}, gamma={:.2})...",
+                cli.input, cli.kernel, cli.blur_radius, gamma
+            );
+            let output = posterize_cmyk_dithered(&img, &kernel, cli.blur_radius, gamma);
+            save_as_color_png(&output, &cli.output).unwrap_or_else(|e| {
+                eprintln!("Failed to save color PNG '{}': {}", cli.output, e);
+                std::process::exit(1);
+            });
             // Measure output mean brightness
             let output_img = image::open(&cli.output).unwrap();
             let output_mean = filters::measure_mean_brightness(&output_img, true);
             println!("Input mean: {:.3}, Output mean: {:.3} (gamma: {:.3})", input_mean, output_mean, gamma);
-            println!("Saved CMYK-mode PNG to {}", cli.output);
+            println!("Saved posterized PNG to {}", cli.output);
         }
         _ => {
             eprintln!("Unknown mode: {}", cli.mode);
-            eprintln!("Available modes: bw, color, dominant, exclusive, cmyk");
+            eprintln!("Available modes: bw, color, dominant, exclusive, posterize");
             std::process::exit(1);
         }
     }

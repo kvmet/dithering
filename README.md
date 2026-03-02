@@ -28,7 +28,7 @@ image_filters [OPTIONS] <INPUT> <OUTPUT>
   - `color` - 8 colors (per-channel dithering)
   - `dominant` - Dominant channel only (more saturated)
   - `exclusive` - Only R, G, B, or W (5 colors)
-  - `cmyk` - Only C, M, Y, K, or W (5 colors)
+  - `posterize` - Posterized CMYK with dithered black and solid color blocks
 
 - `-k, --kernel <KERNEL>` - Dither kernel [default: anneal:4x4]
   - `bayer2` - Bayer 2x2 pattern
@@ -62,6 +62,10 @@ image_filters [OPTIONS] <INPUT> <OUTPUT>
 - `--print-scores` - Print score table and exit
   - Use with `-k` to specify which kernel to analyze
 
+- `--blur-radius <FLOAT>` - Blur radius for posterize mode [default: 3.0]
+  - Creates larger color blocks in posterize mode
+  - Higher values create bigger, smoother color regions
+
 - `-h, --help` - Print help
 - `-V, --version` - Print version
 
@@ -86,8 +90,11 @@ image_filters -m color -n -g 1.2 input.jpg output.png
 # Dominant mode with custom threshold
 image_filters -m dominant -t 0.5 -n input.jpg output.png
 
-# CMYK mode with Bayer kernel
-image_filters -m cmyk -k bayer4 input.jpg output.png
+# Posterize mode with CMYK colors and dithered blacks
+image_filters -m posterize input.jpg output.png
+
+# Posterize with more blur for larger color blocks
+image_filters -m posterize --blur-radius 5.0 input.jpg output.png
 
 # Use an annealed kernel (optimized for max difference between neighbors)
 image_filters -k anneal:4x4:12345 input.jpg output.png
