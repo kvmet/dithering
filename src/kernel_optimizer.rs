@@ -10,6 +10,13 @@ const ALIGNMENT_PENALTY_DIAGONAL: f32 = -3.0;
 const CLUSTERING_PENALTY_MULTIPLIER: f32 = 2.0;
 const NEARBY_SEQUENTIAL_WINDOW: usize = 3;
 
+/// Calculate toroidal (wrapped) distance component between two coordinates
+#[inline]
+fn toroidal_distance_component(a: usize, b: usize, size: usize) -> i32 {
+    let diff = (a as i32 - b as i32).abs();
+    diff.min(size as i32 - diff)
+}
+
 #[derive(Clone)]
 pub struct Kernel {
     pub grid: Vec<f32>,
@@ -68,8 +75,8 @@ impl Kernel {
                 let (r2, c2) = positions[j];
 
                 // Calculate wrapped distance (toroidal)
-                let dr = ((r1 as i32 - r2 as i32).abs()).min(self.size as i32 - (r1 as i32 - r2 as i32).abs());
-                let dc = ((c1 as i32 - c2 as i32).abs()).min(self.size as i32 - (c1 as i32 - c2 as i32).abs());
+                let dr = toroidal_distance_component(r1, r2, self.size);
+                let dc = toroidal_distance_component(c1, c2, self.size);
 
                 let distance = ((dr * dr + dc * dc) as f32).sqrt();
 
@@ -135,8 +142,8 @@ impl Kernel {
                 let (r2, c2) = positions[j];
 
                 // Calculate toroidal distance squared
-                let dr = ((r1 as i32 - r2 as i32).abs()).min(self.size as i32 - (r1 as i32 - r2 as i32).abs());
-                let dc = ((c1 as i32 - c2 as i32).abs()).min(self.size as i32 - (c1 as i32 - c2 as i32).abs());
+                let dr = toroidal_distance_component(r1, r2, self.size);
+                let dc = toroidal_distance_component(c1, c2, self.size);
                 let dist_sq = dr * dr + dc * dc;
 
                 if dist_sq <= radius_sq {
@@ -332,8 +339,8 @@ fn find_aligned_pair(
         let (r2, c2) = positions[j];
 
         // Check if aligned (row, column, or diagonal)
-        let dr = ((r1 as i32 - r2 as i32).abs()).min(size as i32 - (r1 as i32 - r2 as i32).abs());
-        let dc = ((c1 as i32 - c2 as i32).abs()).min(size as i32 - (c1 as i32 - c2 as i32).abs());
+        let dr = toroidal_distance_component(r1, r2, size);
+        let dc = toroidal_distance_component(c1, c2, size);
 
         if r1 == r2 || c1 == c2 || dr == dc {
             // Found aligned pair - return grid positions
