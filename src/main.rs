@@ -43,8 +43,8 @@ struct Cli {
         short,
         long,
         value_name = "KERNEL",
-        default_value = "optimized",
-        help = "Kernel: example, optimized, bayer2, bayer4, seeded (3x3:SEED, 4x4:SEED, 3x3c:SEED, 4x4c:SEED), or annealed (anneal:3x3[:SEED], anneal:4x4[:SEED], anneal:5x5[:SEED] - omit seed for random, seeds can be alphanumeric)"
+        default_value = "anneal:4x4",
+        help = "Kernel: bayer2, bayer4, or annealed (anneal:4x4[:SEED], anneal:5x5[:SEED] - omit seed for random, seeds can be alphanumeric)"
     )]
     kernel: String,
 
@@ -157,7 +157,7 @@ fn main() {
     let kernel = if cli.kernel.contains(':') {
         let parts: Vec<&str> = cli.kernel.split(':').collect();
 
-        // Check if it's an annealed kernel: "anneal:3x3:abc123", "anneal:4x4:xyz", or "anneal:4x4" (random)
+        // Check if it's an annealed kernel: "anneal:4x4:abc123", "anneal:4x4:xyz", or "anneal:4x4" (random)
         if (parts.len() == 3 || parts.len() == 2) && parts[0] == "anneal" {
             let size_part = parts[1];
 
@@ -192,73 +192,28 @@ fn main() {
             };
 
             match size_part {
-                "3x3" => ThresholdKernel::from_annealing(3, 3, seed),
                 "4x4" => ThresholdKernel::from_annealing(4, 4, seed),
                 "5x5" => ThresholdKernel::from_annealing(5, 5, seed),
                 _ => {
                     eprintln!("Invalid kernel size for annealing: {}", size_part);
-                    eprintln!("Available sizes: 3x3, 4x4, 5x5");
+                    eprintln!("Available sizes: 4x4, 5x5");
                     std::process::exit(1);
-                }
-            }
-        } else if parts.len() == 2 {
-            // Parse seeded kernel: "3x3:12345", "4x4:67890", "3x3c:42.5", "4x4c:10.7"
-            let size_part = parts[0];
-            let seed_part = parts[1];
-
-            // Check if it's continuous (ends with 'c')
-            if size_part.ends_with('c') {
-            // Continuous seed (float)
-                let seed: f32 = seed_part.parse().unwrap_or_else(|_| {
-                    eprintln!("Invalid continuous seed number: {}", seed_part);
-                    std::process::exit(1);
-                });
-
-                let size_str = &size_part[..size_part.len()-1]; // Remove 'c'
-                match size_str {
-                    "3x3" => ThresholdKernel::from_seed_continuous(3, 3, seed),
-                    "4x4" => ThresholdKernel::from_seed_continuous(4, 4, seed),
-                    _ => {
-                        eprintln!("Invalid kernel size: {}", size_part);
-                        eprintln!("Available sizes: 3x3c, 4x4c");
-                        std::process::exit(1);
-                    }
-                }
-            } else {
-                // Discrete seed (integer)
-                let seed: u64 = seed_part.parse().unwrap_or_else(|_| {
-                    eprintln!("Invalid discrete seed number: {}", seed_part);
-                    std::process::exit(1);
-                });
-
-                match size_part {
-                    "3x3" => ThresholdKernel::from_seed(3, 3, seed),
-                    "4x4" => ThresholdKernel::from_seed(4, 4, seed),
-                    _ => {
-                        eprintln!("Invalid kernel size: {}", size_part);
-                        eprintln!("Available sizes: 3x3, 4x4");
-                        std::process::exit(1);
-                    }
                 }
             }
         } else {
             eprintln!("Invalid kernel format: {}", cli.kernel);
-            eprintln!("Use format: 3x3:SEED, 4x4:SEED, 3x3c:SEED, 4x4c:SEED, or anneal:SIZE[:SEED]");
-            eprintln!("Examples: 3x3:42 (discrete), 3x3c:42.5 (continuous), anneal:4x4:abc123, anneal:5x5 (random)");
+            eprintln!("Use format: anneal:SIZE[:SEED]");
+            eprintln!("Examples: anneal:4x4:abc123, anneal:5x5 (random)");
             std::process::exit(1);
         }
     } else {
         match cli.kernel.as_str() {
-            "example" => ThresholdKernel::example_3x3(),
-            "optimized" => ThresholdKernel::optimized_3x3(),
             "bayer2" => ThresholdKernel::bayer_2x2(),
             "bayer4" => ThresholdKernel::bayer_4x4(),
             _ => {
                 eprintln!("Unknown kernel type: {}", cli.kernel);
-                eprintln!("Available: example, optimized, bayer2, bayer4");
-                eprintln!("Or seeded: 3x3:SEED, 4x4:SEED (discrete)");
-                eprintln!("Or continuous: 3x3c:SEED, 4x4c:SEED (continuous)");
-                eprintln!("Or annealed: anneal:3x3[:SEED], anneal:4x4[:SEED], anneal:5x5[:SEED] (omit seed for random, seeds can be alphanumeric)");
+                eprintln!("Available: bayer2, bayer4");
+                eprintln!("Or annealed: anneal:4x4[:SEED], anneal:5x5[:SEED] (omit seed for random, seeds can be alphanumeric)");
                 std::process::exit(1);
             }
         }

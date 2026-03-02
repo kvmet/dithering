@@ -51,87 +51,6 @@ impl ThresholdKernel {
         self.values[y * self.width + x]
     }
 
-    /// Generate a kernel from a discrete seed
-    ///
-    /// Creates evenly distributed threshold values and shuffles them deterministically
-    /// based on the seed. Same seed always produces the same kernel.
-    /// Note: Similar seeds produce completely different patterns (high avalanche).
-    pub fn from_seed(width: usize, height: usize, seed: u64) -> Self {
-        let total = width * height;
-
-        // Generate evenly distributed values
-        let mut values: Vec<f64> = (0..total)
-            .map(|i| (i + 1) as f64 / (total + 1) as f64)
-            .collect();
-
-        // Deterministic shuffle using a simple LCG (Linear Congruential Generator)
-        let mut rng_state = seed;
-        for i in (1..total).rev() {
-            // LCG: next = (a * state + c) mod m
-            rng_state = rng_state.wrapping_mul(6364136223846793005).wrapping_add(1);
-            let j = (rng_state as usize) % (i + 1);
-            values.swap(i, j);
-        }
-
-        Self::new(width, height, values)
-    }
-
-    /// Generate a kernel from a continuous seed
-    ///
-    /// Similar to from_seed, but with low avalanche - similar seeds produce similar shuffle patterns.
-    /// Still uses evenly distributed threshold values like from_seed.
-    /// This allows for continuous optimization where nearby seeds produce similar dither patterns.
-    pub fn from_seed_continuous(width: usize, height: usize, seed: f32) -> Self {
-        let total = width * height;
-
-        // Generate evenly distributed values (same as discrete version)
-        let mut values: Vec<f64> = (0..total)
-            .map(|i| (i + 1) as f64 / (total + 1) as f64)
-            .collect();
-
-        // Create a smooth shuffle using seed-controlled swap interpolation
-        // Instead of discrete swaps, we use fractional positions
-        for i in (1..total).rev() {
-            // Generate a smooth pseudo-random value from seed and position
-            // Using multiple sine waves for smooth variation
-            let t1 = ((seed + i as f32 * 0.1) * 0.7).sin();
-            let t2 = ((seed * 1.3 + i as f32 * 0.3) * 0.5).cos();
-            let combined = (t1 + t2) * 0.5 + 0.5; // Normalize to 0.0-1.0
-
-            // Map to a swap index
-            let j = (combined * (i + 1) as f32) as usize % (i + 1);
-            values.swap(i, j);
-        }
-
-        Self::new(width, height, values)
-    }
-
-    /// The example 3x3 kernel from the description (29%, 1%, 47%, etc.)
-    /// Values are squared percentages normalized to 0-1 range
-    pub fn example_3x3() -> Self {
-        let values = vec![
-            (29.0 * 29.0) / 10000.0, (1.0 * 1.0) / 10000.0, (47.0 * 47.0) / 10000.0,
-            (41.0 * 41.0) / 10000.0, (37.0 * 37.0) / 10000.0, (1.0 * 1.0) / 10000.0,
-            (23.0 * 23.0) / 10000.0, (41.0 * 41.0) / 10000.0, (29.0 * 29.0) / 10000.0,
-        ];
-        Self::new(3, 3, values)
-    }
-
-    /// Create an optimized 3x3 kernel with evenly distributed thresholds
-    /// that are maximally different from their neighbors
-    pub fn optimized_3x3() -> Self {
-        // Values chosen to:
-        // 1. Spread thresholds evenly (1/10, 2/10, ..., 9/10)
-        // 2. Maximize difference between adjacent cells
-        let values = vec![
-            2.0/16.0, 9.0/16.0, 5.0/16.0, 14.0/16.0,
-            11.0/16.0, 4.0/16.0, 16.0/16.0, 7.0/16.0,
-            15.0/16.0, 8.0/16.0, 12.0/16.0, 3.0/16.0,
-            6.0/16.0, 13.0/16.0, 1.0/16.0, 10.0/16.0,
-        ];
-        Self::new(4, 4, values)
-    }
-
     /// Generate an optimized kernel using simulated annealing
     ///
     /// Creates a kernel with evenly distributed threshold values that are arranged
@@ -1023,10 +942,5 @@ mod tests {
         assert_eq!(kernel.get(1, 1), 0.5);
     }
 
-    #[test]
-    fn test_example_kernel() {
-        let kernel = ThresholdKernel::example_3x3();
-        assert_eq!(kernel.width, 3);
-        assert_eq!(kernel.height, 3);
-    }
+
 }
