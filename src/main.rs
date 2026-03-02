@@ -83,6 +83,10 @@ struct Cli {
     /// Print kernel values and exit (use with -k to specify kernel)
     #[arg(long, help = "Print kernel values and exit")]
     print_kernel: bool,
+
+    /// Print score table and exit (use with -k to specify kernel)
+    #[arg(long, help = "Print score table and exit")]
+    print_scores: bool,
 }
 
 fn main() {
@@ -237,6 +241,47 @@ fn main() {
         }
         println!();
         println!("Values (flat): {:?}", kernel.values);
+
+        // Compute and display score
+        let kernel_obj = kernel_optimizer::Kernel::new(kernel.width, kernel.values.clone());
+        let score = kernel_obj.score();
+        println!("Score: {:.2}", score);
+
+        return;
+    }
+
+    // If --print-scores flag is set, print score table and exit
+    if cli.print_scores {
+        println!("Kernel: {} ({}x{})", cli.kernel, kernel.width, kernel.height);
+        println!();
+
+        // Build the kernel and compute scoring table
+        use kernel_optimizer::Kernel;
+        let kernel_obj = Kernel::new(kernel.width, kernel.values.clone());
+        let score = kernel_obj.score();
+
+        println!("Overall Score: {:.2}", score);
+        println!();
+
+        // Create the score lookup table
+        use kernel_optimizer::ScoreLookup;
+        let lookup = ScoreLookup::new(kernel.width);
+
+        // Print score matrices for various value distances
+        println!("Position-to-Position Score Matrices:");
+        println!("(Shows how much each position pair contributes to the score for different value distances)");
+        println!();
+
+        // Print matrices for a few representative value distances
+        let n = kernel.values.len();
+        let distances_to_show = vec![1, n / 4, n / 2, n - 1];
+
+        for &dist in &distances_to_show {
+            if dist > 0 && dist < n {
+                lookup.print_score_matrix(dist);
+            }
+        }
+
         return;
     }
 

@@ -4,93 +4,158 @@
 use std::fmt;
 use std::time::Instant;
 
-/// Incremental scorer that caches pairwise scores for efficiency
-/// When swapping two values, only recalculates affected pairs (O(n) instead of O(n²))
+/// Static score lookup table precomputed once for all possible arrangements
+/// lookup[pos_i][pos_j][value_distance] = score contribution for positions with given value distance
+pub struct ScoreLookup {
+    // Flattened 3D array: [pos_i * n * (n-1) + pos_j * (n-1) + (value_distance - 1)]
+    table: Vec<f32>,
+    n: usize, // grid size (total number of values/positions)
+    size: usize, // grid width/height
+}
+
+impl ScoreLookup {
+    pub fn new(size: usize) -> Self {
+        let n = size * size;
+        let max_value_distance = n - 1;
+        let table_size = n * n * max_value_distance;
+        let mut table = vec![0.0; table_size];
+
+        // Precompute all possible scores
+        for pos_i in 0..n {
+            let (r1, c1) = (pos_i / size, pos_i % size);
+
+            for pos_j in 0..n {
+                if pos_i == pos_j {
+                    continue;
+                }
+
+                let (r2, c2) = (pos_j / size, pos_j % size);
+
+                let dr = toroidal_distance_component(r1, r2, size);
+                let dc = toroidal_distance_component(c1, c2, size);
+                let distance_sq = (dr * dr + dc * dc) as f32;
+
+                // Branchless geometry weight selection
+                let is_vertical = (c1 == c2) as i32 as f32;
+                let is_horizontal = (r1 == r2) as i32 as f32;
+                let is_pos_diagonal = (dr == dc) as i32 as f32;
+                let is_neg_diagonal = (dr == -dc) as i32 as f32;
+                let is_knight = ((dr * dr + dc * dc) == 5) as i32 as f32;
+
+                let geometry_weight = is_vertical * VERTICAL_WEIGHT
+                    + is_horizontal * HORIZONTAL_WEIGHT
+                    + is_pos_diagonal * POSITIVE_DIAGONAL_WEIGHT
+                    + is_neg_diagonal * NEGATIVE_DIAGONAL_WEIGHT
+                    + is_knight * KNIGHT_WEIGHT
+                    + (1.0 - is_vertical - is_horizontal - is_pos_diagonal - is_neg_diagonal - is_knight) * OTHER_WEIGHT;
+
+                // For each possible value distance
+                for value_distance in 1..=max_value_distance {
+                    let sequence_weight = 1.0 / value_distance as f32;
+                    // Position weight uses the smaller value index (0-based)
+                    // We approximate by using value_distance as a proxy
+                    let position_weight = 1.0 / ((n - value_distance + 1) as f32).sqrt();
+                    let combined_weight = sequence_weight * position_weight;
+
+                    let score = geometry_weight * distance_sq * combined_weight;
+                    let idx = pos_i * n * max_value_distance + pos_j * max_value_distance + (value_distance - 1);
+                    table[idx] = score;
+                }
+            }
+        }
+
+        ScoreLookup { table, n, size }
+    }
+
+    #[inline]
+    fn get(&self, val_i: usize, val_j: usize, pos_i: usize, pos_j: usize) -> f32 {
+        let value_distance = if val_i > val_j { val_i - val_j } else { val_j - val_i };
+        if value_distance == 0 {
+            return 0.0;
+        }
+        let max_value_distance = self.n - 1;
+        let idx = pos_i * self.n * max_value_distance + pos_j * max_value_distance + (value_distance - 1);
+        self.table[idx]
+    }
+
+    /// Print the normalized distance score matrix for a given value distance
+    pub fn print_score_matrix(&self, value_distance: usize) {
+        if value_distance == 0 || value_distance >= self.n {
+            println!("Invalid value_distance: {} (must be 1..{})", value_distance, self.n - 1);
+            return;
+        }
+
+        println!("Score matrix for value distance = {} ({}x{} grid):", value_distance, self.size, self.size);
+        println!("Each cell shows the score contribution for that position pair.");
+        println!();
+
+        // Print header with column coordinates
+        print!("      ");
+        for col in 0..self.n {
+            print!("{:7}", format!("({})", col));
+        }
+        println!();
+
+        // Print separator
+        print!("      ");
+        for _ in 0..self.n {
+            print!("-------");
+        }
+        println!();
+
+        // Print each row
+        for pos_i in 0..self.n {
+            print!("({:2}) |", pos_i);
+            for pos_j in 0..self.n {
+                if pos_i == pos_j {
+                    print!("   -   ");
+                } else {
+                    let max_value_distance = self.n - 1;
+                    let idx = pos_i * self.n * max_value_distance + pos_j * max_value_distance + (value_distance - 1);
+                    let score = self.table[idx];
+                    print!("{:7.3}", score);
+                }
+            }
+            println!();
+        }
+        println!();
+    }
+}
+
+/// Incremental scorer that uses static lookup table for O(1) pair score lookups
 struct IncrementalScorer {
     size: usize,
-    positions: Vec<(usize, usize)>,
+    positions: Vec<(usize, usize)>, // positions[val_idx] = (row, col) where that value is located
+    lookup: ScoreLookup,
 
     // Current total score with weights applied
     total_score: f32,
 
     // Store old score for efficient undo
     old_score: f32,
-
-    // Precomputed score table: score_table[val_i][val_j] = score for that value pair
-    // Indexed by value indices (0-based), stores score at their current positions
-    score_table: Vec<Vec<f32>>,
 }
 
 impl IncrementalScorer {
     /// Initialize scorer with starting positions
     fn new(size: usize, positions: Vec<(usize, usize)>) -> Self {
-        let n = positions.len();
+        println!("Building static score lookup table...");
+        let lookup = ScoreLookup::new(size);
+        println!("Lookup table built: {} entries ({:.2} MB)",
+                 lookup.table.len(),
+                 (lookup.table.len() * std::mem::size_of::<f32>()) as f64 / 1024.0 / 1024.0);
+
         let mut scorer = IncrementalScorer {
             size,
             positions,
+            lookup,
             total_score: 0.0,
             old_score: 0.0,
-            score_table: vec![vec![0.0; n]; n],
         };
 
-        // Build score lookup table
-        scorer.build_score_table();
-
-        // Calculate initial score from table
+        // Calculate initial score from lookup table
         scorer.total_score = scorer.calculate_full_score();
 
         scorer
-    }
-
-    /// Build the score lookup table for all value pairs at their current positions
-    fn build_score_table(&mut self) {
-        let n = self.positions.len();
-
-        for i in 0..n {
-            for j in (i + 1)..n {
-                let score = self.calculate_pair_score_direct(i, j);
-                self.score_table[i][j] = score;
-                self.score_table[j][i] = score; // Symmetric
-            }
-        }
-    }
-
-    /// Calculate score for a pair directly from positions (used for table building)
-    fn calculate_pair_score_direct(&self, val_idx1: usize, val_idx2: usize) -> f32 {
-        let (r1, c1) = self.positions[val_idx1];
-        let (r2, c2) = self.positions[val_idx2];
-
-        let dr = toroidal_distance_component(r1, r2, self.size);
-        let dc = toroidal_distance_component(c1, c2, self.size);
-        let distance_sq = (dr * dr + dc * dc) as f32;
-
-        let (i, j) = if val_idx1 < val_idx2 {
-            (val_idx1, val_idx2)
-        } else {
-            (val_idx2, val_idx1)
-        };
-
-        let sequence_distance = (j - i) as f32;
-        let sequence_weight = 1.0 / sequence_distance;
-        let position_weight = 1.0 / ((i + 1) as f32).sqrt();
-        let combined_weight = sequence_weight * position_weight;
-        let weighted_distance = distance_sq * combined_weight;
-
-        // Branchless weight selection
-        let is_vertical = (c1 == c2) as i32 as f32;
-        let is_horizontal = (r1 == r2) as i32 as f32;
-        let is_pos_diagonal = (dr == dc) as i32 as f32;
-        let is_neg_diagonal = (dr == -dc) as i32 as f32;
-        let is_knight = ((dr * dr + dc * dc) == 5) as i32 as f32;
-
-        let weight = is_vertical * VERTICAL_WEIGHT
-            + is_horizontal * HORIZONTAL_WEIGHT
-            + is_pos_diagonal * POSITIVE_DIAGONAL_WEIGHT
-            + is_neg_diagonal * NEGATIVE_DIAGONAL_WEIGHT
-            + is_knight * KNIGHT_WEIGHT
-            + (1.0 - is_vertical - is_horizontal - is_pos_diagonal - is_neg_diagonal - is_knight) * OTHER_WEIGHT;
-
-        weight * weighted_distance
     }
 
     /// Get total score
@@ -102,7 +167,11 @@ impl IncrementalScorer {
     /// Get score for a pair from the lookup table
     #[inline]
     fn get_pair_score(&self, val_idx1: usize, val_idx2: usize) -> f32 {
-        self.score_table[val_idx1][val_idx2]
+        let (r1, c1) = self.positions[val_idx1];
+        let (r2, c2) = self.positions[val_idx2];
+        let pos_i = r1 * self.size + c1;
+        let pos_j = r2 * self.size + c2;
+        self.lookup.get(val_idx1, val_idx2, pos_i, pos_j)
     }
 
     /// Calculate full score from lookup table
@@ -112,7 +181,7 @@ impl IncrementalScorer {
 
         for i in 0..n {
             for j in (i + 1)..n {
-                total += self.score_table[i][j];
+                total += self.get_pair_score(i, j);
             }
         }
 
@@ -141,28 +210,7 @@ impl IncrementalScorer {
         // Swap positions
         self.positions.swap(val_idx1, val_idx2);
 
-        // Recalculate and update affected entries in score table
-        for other_idx in 0..n {
-            if other_idx == val_idx1 || other_idx == val_idx2 {
-                continue;
-            }
-
-            // Recalculate scores for pairs involving the swapped values
-            let score1 = self.calculate_pair_score_direct(val_idx1, other_idx);
-            let score2 = self.calculate_pair_score_direct(val_idx2, other_idx);
-
-            self.score_table[val_idx1][other_idx] = score1;
-            self.score_table[other_idx][val_idx1] = score1;
-            self.score_table[val_idx2][other_idx] = score2;
-            self.score_table[other_idx][val_idx2] = score2;
-        }
-
-        // Update the pair between val_idx1 and val_idx2
-        let score_between = self.calculate_pair_score_direct(val_idx1, val_idx2);
-        self.score_table[val_idx1][val_idx2] = score_between;
-        self.score_table[val_idx2][val_idx1] = score_between;
-
-        // Calculate new pair scores from updated table
+        // Calculate new pair scores from lookup table (positions already swapped)
         let mut new_pairs_sum = 0.0;
         for other_idx in 0..n {
             if other_idx == val_idx1 || other_idx == val_idx2 {
@@ -190,16 +238,16 @@ impl IncrementalScorer {
 // Scoring weights for each geometric bucket
 // Lower weight = penalize this geometry (we don't want distance here)
 // Higher weight = reward this geometry (we want distance here)
-const VERTICAL_WEIGHT: f32 = 0.2;            // Weight for vertical (same column) alignments - BAD
-const HORIZONTAL_WEIGHT: f32 = 0.2;          // Weight for horizontal (same row) alignments - BAD
-const POSITIVE_DIAGONAL_WEIGHT: f32 = 0.5;   // Weight for positive diagonal (slope = 1) - LESS BAD
-const NEGATIVE_DIAGONAL_WEIGHT: f32 = 0.5;   // Weight for negative diagonal (slope = -1) - LESS BAD
-const KNIGHT_WEIGHT: f32 = 1.0;              // Weight for knight move patterns (2,1 or 1,2) - MEDIUM
-const OTHER_WEIGHT: f32 = 2.0;               // Weight for all other geometric relationships - GOOD
+const VERTICAL_WEIGHT: f32 = 0.1;            // Weight for vertical (same column) alignments - BAD
+const HORIZONTAL_WEIGHT: f32 = 0.1;          // Weight for horizontal (same row) alignments - BAD
+const POSITIVE_DIAGONAL_WEIGHT: f32 = 0.144;   // Weight for positive diagonal (slope = 1) - LESS BAD
+const NEGATIVE_DIAGONAL_WEIGHT: f32 = 0.144;   // Weight for negative diagonal (slope = -1) - LESS BAD
+const KNIGHT_WEIGHT: f32 = 0.5;              // Weight for knight move patterns (2,1 or 1,2) - MEDIUM
+const OTHER_WEIGHT: f32 = 1.0;               // Weight for all other geometric relationships - GOOD
 
 /// Calculate toroidal (wrapped) distance component between two coordinates
 #[inline]
-fn toroidal_distance_component(a: usize, b: usize, size: usize) -> i32 {
+pub fn toroidal_distance_component(a: usize, b: usize, size: usize) -> i32 {
     let diff = (a as i32 - b as i32).abs();
     diff.min(size as i32 - diff)
 }
