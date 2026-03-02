@@ -4,6 +4,203 @@
 use std::fmt;
 use std::time::Instant;
 
+/// Incremental scorer that caches pairwise scores for efficiency
+/// When swapping two values, only recalculates affected pairs (O(n) instead of O(n²))
+struct IncrementalScorer {
+    size: usize,
+    positions: Vec<(usize, usize)>,
+
+    // Current total pairwise score (distance + alignment penalties)
+    pairwise_score: f32,
+
+    // Current total clustering penalty
+    clustering_penalty: f32,
+}
+
+impl IncrementalScorer {
+    /// Initialize scorer with starting positions
+    fn new(size: usize, positions: Vec<(usize, usize)>) -> Self {
+        let mut scorer = IncrementalScorer {
+            size,
+            positions,
+            pairwise_score: 0.0,
+            clustering_penalty: 0.0,
+        };
+
+        // Calculate initial scores
+        scorer.pairwise_score = scorer.calculate_full_pairwise_score();
+        scorer.clustering_penalty = scorer.calculate_full_clustering_penalty();
+
+        scorer
+    }
+
+    /// Get total score
+    #[inline]
+    fn total_score(&self) -> f32 {
+        self.pairwise_score + self.clustering_penalty
+    }
+
+    /// Calculate pairwise score contribution for a single value index
+    #[inline]
+    fn calculate_pairwise_for_value(&self, val_idx: usize) -> f32 {
+        let mut score = 0.0;
+        let (r1, c1) = self.positions[val_idx];
+
+        for other_idx in 0..self.positions.len() {
+            if other_idx == val_idx {
+                continue;
+            }
+
+            let (r2, c2) = self.positions[other_idx];
+
+            // Calculate wrapped distance squared (toroidal)
+            let dr = toroidal_distance_component(r1, r2, self.size);
+            let dc = toroidal_distance_component(c1, c2, self.size);
+            let distance_sq = (dr * dr + dc * dc) as f32;
+
+            // Determine which index is smaller for consistent weighting
+            let (i, j) = if val_idx < other_idx {
+                (val_idx, other_idx)
+            } else {
+                (other_idx, val_idx)
+            };
+
+            // Weight by sequence distance (closer in sequence = more important)
+            let sequence_distance = (j - i) as f32;
+            let sequence_weight = 1.0 / sequence_distance;
+
+            // Weight by position (early transitions more visible than late)
+            let position_weight = 1.0 / ((i + 1) as f32).sqrt();
+
+            let combined_weight = sequence_weight * position_weight;
+
+            // Reward distance squared
+            score += distance_sq * combined_weight;
+
+            // Penalties for alignment (causes banding)
+            let alignment_penalty = if r1 == r2 || c1 == c2 {
+                ALIGNMENT_PENALTY_SAME_LINE * combined_weight
+            } else if dr == dc {
+                ALIGNMENT_PENALTY_DIAGONAL * combined_weight
+            } else {
+                0.0
+            };
+
+            score += alignment_penalty;
+        }
+
+        score
+    }
+
+    /// Calculate full pairwise score (used for initialization)
+    fn calculate_full_pairwise_score(&self) -> f32 {
+        let mut total = 0.0;
+
+        for i in 0..self.positions.len() {
+            for j in (i + 1)..self.positions.len() {
+                let (r1, c1) = self.positions[i];
+                let (r2, c2) = self.positions[j];
+
+                let dr = toroidal_distance_component(r1, r2, self.size);
+                let dc = toroidal_distance_component(c1, c2, self.size);
+                let distance_sq = (dr * dr + dc * dc) as f32;
+
+                let sequence_distance = (j - i) as f32;
+                let sequence_weight = 1.0 / sequence_distance;
+                let position_weight = 1.0 / ((i + 1) as f32).sqrt();
+                let combined_weight = sequence_weight * position_weight;
+
+                total += distance_sq * combined_weight;
+
+                let alignment_penalty = if r1 == r2 || c1 == c2 {
+                    ALIGNMENT_PENALTY_SAME_LINE * combined_weight
+                } else if dr == dc {
+                    ALIGNMENT_PENALTY_DIAGONAL * combined_weight
+                } else {
+                    0.0
+                };
+
+                total += alignment_penalty;
+            }
+        }
+
+        total
+    }
+
+    /// Calculate full clustering penalty (for now, recalculated each time)
+    fn calculate_full_clustering_penalty(&self) -> f32 {
+        let cluster_radius = if self.size > 3 { self.size - 3 } else { 0 };
+        if cluster_radius == 0 {
+            return 0.0;
+        }
+
+        let mut penalty = 0.0;
+        let radius_sq = (cluster_radius * cluster_radius) as i32;
+
+        for i in 0..self.positions.len() {
+            let (r1, c1) = self.positions[i];
+            let mut nearby_sequential = 0;
+
+            let start = if i >= NEARBY_SEQUENTIAL_WINDOW { i - NEARBY_SEQUENTIAL_WINDOW } else { 0 };
+            let end = (i + NEARBY_SEQUENTIAL_WINDOW + 1).min(self.positions.len());
+
+            for j in start..end {
+                if j == i {
+                    continue;
+                }
+
+                let (r2, c2) = self.positions[j];
+                let dr = toroidal_distance_component(r1, r2, self.size);
+                let dc = toroidal_distance_component(c1, c2, self.size);
+                let dist_sq = dr * dr + dc * dc;
+
+                if dist_sq <= radius_sq {
+                    nearby_sequential += 1;
+                }
+            }
+
+            let position_weight = 1.0 / ((i + 1) as f32).sqrt();
+            penalty -= (nearby_sequential as f32) * CLUSTERING_PENALTY_MULTIPLIER * position_weight;
+        }
+
+        penalty
+    }
+
+    /// Update score incrementally after swapping two value indices
+    /// val_idx1 and val_idx2 are the VALUE indices (0-based, from the positions array)
+    fn update_after_swap(&mut self, val_idx1: usize, val_idx2: usize) {
+        // Subtract out old contributions from both values
+        let old_contribution1 = self.calculate_pairwise_for_value(val_idx1);
+        let old_contribution2 = self.calculate_pairwise_for_value(val_idx2);
+
+        // Swap positions
+        self.positions.swap(val_idx1, val_idx2);
+
+        // Add back new contributions
+        let new_contribution1 = self.calculate_pairwise_for_value(val_idx1);
+        let new_contribution2 = self.calculate_pairwise_for_value(val_idx2);
+
+        // Update pairwise score
+        // Note: we subtract old_contribution/2 because each pair is counted twice
+        // (once from each value's perspective), but we only want to count it once
+        self.pairwise_score = self.pairwise_score
+            - old_contribution1 / 2.0
+            - old_contribution2 / 2.0
+            + new_contribution1 / 2.0
+            + new_contribution2 / 2.0;
+
+        // Recalculate clustering penalty (not optimized yet)
+        self.clustering_penalty = self.calculate_full_clustering_penalty();
+    }
+
+    /// Undo a swap (used when rejecting a move)
+    fn undo_swap(&mut self, val_idx1: usize, val_idx2: usize) {
+        // Just swap back and recalculate
+        // We could be smarter here but swaps are cheap
+        self.update_after_swap(val_idx1, val_idx2);
+    }
+}
+
 // Scoring constants
 const ALIGNMENT_PENALTY_SAME_LINE: f32 = -5.0;
 const ALIGNMENT_PENALTY_DIAGONAL: f32 = -3.0;
@@ -201,8 +398,11 @@ pub fn optimize_kernel(
     }
 
     let mut current_kernel = Kernel::new(size, current.clone());
-    let mut current_score = current_kernel.score();
-    let mut positions = current_kernel.build_positions();
+    let positions = current_kernel.build_positions();
+
+    // Initialize incremental scorer
+    let mut scorer = IncrementalScorer::new(size, positions);
+    let mut current_score = scorer.total_score();
 
     let mut best_kernel = current_kernel.clone();
     let mut best_score = current_score;
@@ -218,7 +418,7 @@ pub fn optimize_kernel(
     // Strategy: start with greedy/smart moves, transition to random
     let greedy_phase_end = iterations / 10; // First 10% is greedy-ish
 
-    println!("Starting simulated annealing (adaptive cooling + smart moves)...");
+    println!("Starting simulated annealing (incremental scoring + adaptive cooling + smart moves)...");
     println!("Initial score: {:.2}", current_score);
 
     for iteration in 0..iterations {
@@ -259,7 +459,7 @@ pub fn optimize_kernel(
         // Smart move strategy: during greedy phase, try to fix alignments
         if iteration < greedy_phase_end && (random() % 3) == 0 {
             // Try to swap aligned values
-            if let Some((pos1, pos2)) = find_aligned_pair(&positions, size, &mut random) {
+            if let Some((pos1, pos2)) = find_aligned_pair(&scorer.positions, size, &mut random) {
                 i = pos1;
                 j = pos2;
             } else {
@@ -276,16 +476,16 @@ pub fn optimize_kernel(
             continue;
         }
 
-        // Try swap
-        current.swap(i, j);
-        let new_kernel = Kernel::new(size, current.clone());
-
-        // Update positions map for the swap
+        // Get value indices for the positions we're swapping
         let val1 = current[i] as usize - 1;
         let val2 = current[j] as usize - 1;
-        positions.swap(val1, val2);
 
-        let new_score = new_kernel.score_with_positions(&positions);
+        // Try swap in grid
+        current.swap(i, j);
+
+        // Update scorer incrementally
+        scorer.update_after_swap(val1, val2);
+        let new_score = scorer.total_score();
 
         let delta = new_score - current_score;
 
@@ -294,8 +494,7 @@ pub fn optimize_kernel(
         if delta > 0.0 || random_val < (delta as f64 / temperature).exp() {
             // Accept the swap
             current_score = new_score;
-            current_kernel = new_kernel;
-            // Positions already updated above
+            current_kernel = Kernel::new(size, current.clone());
             accepts += 1;
 
             if current_score > best_score {
@@ -303,11 +502,9 @@ pub fn optimize_kernel(
                 best_kernel = current_kernel.clone();
             }
         } else {
-            // Reject: swap back both current and positions
+            // Reject: swap back both current and scorer
             current.swap(i, j);
-            let val1 = current[i] as usize - 1;
-            let val2 = current[j] as usize - 1;
-            positions.swap(val1, val2);
+            scorer.undo_swap(val1, val2);
             rejects += 1;
         }
 
