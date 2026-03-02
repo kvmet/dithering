@@ -170,6 +170,7 @@ impl ThresholdKernel {
             initial_temp,
             cooling_rate,
             seed,
+            1.0, // sequence_weight_strength: use full 1/distance penalty
         );
 
         // Convert from 1..N to 0..1 range

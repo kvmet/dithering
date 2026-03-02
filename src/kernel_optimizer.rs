@@ -4,6 +4,31 @@
 use std::fmt;
 use std::time::Instant;
 
+// Scoring weights for each geometric bucket
+// Lower weight = penalize this geometry (we don't want distance here)
+// Higher weight = reward this geometry (we want distance here)
+const VERTICAL_WEIGHT: f32 = 0.2;            // Weight for vertical (same column) alignments - BAD
+const HORIZONTAL_WEIGHT: f32 = 0.2;          // Weight for horizontal (same row) alignments - BAD
+const POSITIVE_DIAGONAL_WEIGHT: f32 = 0.3;   // Weight for positive diagonal (slope = 1) - LESS BAD
+const NEGATIVE_DIAGONAL_WEIGHT: f32 = 0.3;   // Weight for negative diagonal (slope = -1) - LESS BAD
+const KNIGHT_WEIGHT: f32 = 0.5;              // Weight for knight move patterns (2,1 or 1,2) - MEDIUM
+const OTHER_WEIGHT: f32 = 1.0;               // Weight for all other geometric relationships - GOOD
+
+// Linear Congruential Generator (LCG) constants
+const LCG_MULTIPLIER: u64 = 1664525;
+const LCG_INCREMENT: u64 = 1013904223;
+
+// Annealing calibration constants
+const CALIBRATION_SAMPLES: usize = 1000;
+const CALIBRATION_TEMP_MULTIPLIER: f32 = 2.0; // initial_temp = avg_delta * this
+const TARGET_FINAL_TEMP_RATIO: f64 = 0.01; // Cool to 1% of initial temp
+
+// Annealing reporting
+const REPORT_INTERVAL: usize = 1_000_000;
+
+// Sequence weight interpolation
+const NO_SEQUENCE_PENALTY: f32 = 1.0; // Weight when sequence_weight_strength = 0
+
 /// Static score lookup table precomputed once for all possible position pairs
 /// Stores only geometry_weight * distance_sq (independent of value assignments)
 /// Position and sequence weights are applied at lookup time
@@ -12,10 +37,15 @@ pub struct ScoreLookup {
     table: Vec<f32>,
     n: usize, // grid size (total number of values/positions)
     size: usize, // grid width/height
+    sequence_weight_strength: f32, // 0.0 = no sequence weight, 1.0 = full 1/distance weight
 }
 
 impl ScoreLookup {
     pub fn new(size: usize) -> Self {
+        Self::new_with_sequence_weight(size, 1.0)
+    }
+
+    pub fn new_with_sequence_weight(size: usize, sequence_weight_strength: f32) -> Self {
         let n = size * size;
         let table_size = n * n;
         let mut table = vec![0.0; table_size];
@@ -56,7 +86,7 @@ impl ScoreLookup {
             }
         }
 
-        ScoreLookup { table, n, size }
+        ScoreLookup { table, n, size, sequence_weight_strength }
     }
 
     #[inline]
@@ -71,7 +101,14 @@ impl ScoreLookup {
 
         // Apply value-dependent weights
         let value_distance = if val_i > val_j { val_i - val_j } else { val_j - val_i };
-        let sequence_weight = 1.0 / value_distance as f32;
+
+        // Sequence weight: interpolate between NO_SEQUENCE_PENALTY and 1/distance (full penalty)
+        let sequence_weight = if self.sequence_weight_strength > 0.0 {
+            let raw_weight = 1.0 / value_distance as f32;
+            NO_SEQUENCE_PENALTY + self.sequence_weight_strength * (raw_weight - NO_SEQUENCE_PENALTY)
+        } else {
+            NO_SEQUENCE_PENALTY
+        };
 
         let smaller_val = val_i.min(val_j);
         let position_weight = 1.0 / (smaller_val + 1) as f32;
@@ -138,8 +175,12 @@ pub struct IncrementalScorer {
 impl IncrementalScorer {
     /// Initialize scorer with starting positions
     pub fn new(size: usize, positions: Vec<(usize, usize)>) -> Self {
-        println!("Building static score lookup table...");
-        let lookup = ScoreLookup::new(size);
+        Self::new_with_sequence_weight(size, positions, 1.0)
+    }
+
+    pub fn new_with_sequence_weight(size: usize, positions: Vec<(usize, usize)>, sequence_weight_strength: f32) -> Self {
+        println!("Building static score lookup table (sequence_weight_strength={:.2})...", sequence_weight_strength);
+        let lookup = ScoreLookup::new_with_sequence_weight(size, sequence_weight_strength);
         println!("Lookup table built: {} entries ({:.2} MB)",
                  lookup.table.len(),
                  (lookup.table.len() * std::mem::size_of::<f32>()) as f64 / 1024.0 / 1024.0);
@@ -233,16 +274,6 @@ impl IncrementalScorer {
     }
 }
 
-// Scoring weights for each geometric bucket
-// Lower weight = penalize this geometry (we don't want distance here)
-// Higher weight = reward this geometry (we want distance here)
-const VERTICAL_WEIGHT: f32 = 0.1;            // Weight for vertical (same column) alignments - BAD
-const HORIZONTAL_WEIGHT: f32 = 0.1;          // Weight for horizontal (same row) alignments - BAD
-const POSITIVE_DIAGONAL_WEIGHT: f32 = 0.12;   // Weight for positive diagonal (slope = 1) - LESS BAD
-const NEGATIVE_DIAGONAL_WEIGHT: f32 = 0.12;   // Weight for negative diagonal (slope = -1) - LESS BAD
-const KNIGHT_WEIGHT: f32 = 0.17;              // Weight for knight move patterns (2,1 or 1,2) - MEDIUM
-const OTHER_WEIGHT: f32 = 1.0;               // Weight for all other geometric relationships - GOOD
-
 /// Calculate toroidal (wrapped) distance component between two coordinates
 #[inline]
 pub fn toroidal_distance_component(a: usize, b: usize, size: usize) -> i32 {
@@ -302,7 +333,11 @@ impl fmt::Display for Kernel {
     }
 }
 
-/// Optimize kernel using simulated annealing with adaptive cooling and smart move strategies
+/// Optimize kernel using simulated annealing with optional auto-calibration
+///
+/// If initial_temp is 0.0, it will be auto-calibrated based on typical score deltas.
+/// If cooling_rate is 0.0, it will be computed to reach 1% of initial temp by the end.
+/// sequence_weight_strength: 0.0 = no sequence penalty, 1.0 = full 1/distance penalty (default)
 pub fn optimize_kernel(
     size: usize,
     values: Vec<f32>,
@@ -310,13 +345,16 @@ pub fn optimize_kernel(
     initial_temp: f64,
     cooling_rate: f64,
     seed: u64,
+    sequence_weight_strength: f32,
 ) -> Kernel {
+    let mut initial_temp = initial_temp;
+    let mut cooling_rate = cooling_rate;
     assert_eq!(values.len(), size * size, "Values must match grid size");
 
     // Simple pseudo-random number generator (LCG)
     let mut rng_state = seed;
     let mut random = || {
-        rng_state = rng_state.wrapping_mul(1664525).wrapping_add(1013904223);
+        rng_state = rng_state.wrapping_mul(LCG_MULTIPLIER).wrapping_add(LCG_INCREMENT);
         rng_state
     };
 
@@ -334,26 +372,74 @@ pub fn optimize_kernel(
     };
 
     // Initialize incremental scorer
-    let mut scorer = IncrementalScorer::new(size, positions);
+    let mut scorer = IncrementalScorer::new_with_sequence_weight(size, positions, sequence_weight_strength);
     let mut current_score = scorer.total_score();
 
     let mut best_arrangement = current.clone();
     let mut best_score = current_score;
 
+    // Auto-calibrate temperature if initial_temp is 0.0
+    if initial_temp == 0.0 {
+        println!("Auto-calibrating initial temperature...");
+        let calibration_samples = CALIBRATION_SAMPLES.min(size * size * 10);
+        let mut delta_sum = 0.0;
+        let mut delta_count = 0;
+
+        for _ in 0..calibration_samples {
+            let i = (random() as usize) % current.len();
+            let mut j = (random() as usize) % current.len();
+            while i == j {
+                j = (random() as usize) % current.len();
+            }
+
+            let val1 = current[i] as usize - 1;
+            let val2 = current[j] as usize - 1;
+
+            current.swap(i, j);
+            scorer.update_after_swap(val1, val2);
+            let new_score = scorer.total_score();
+            let delta = (new_score - current_score).abs();
+
+            if delta > 0.0 {
+                delta_sum += delta;
+                delta_count += 1;
+            }
+
+            // Undo the swap
+            current.swap(i, j);
+            scorer.undo_swap(val1, val2);
+        }
+
+        if delta_count > 0 {
+            let avg_delta = delta_sum / delta_count as f32;
+            initial_temp = (avg_delta * CALIBRATION_TEMP_MULTIPLIER) as f64;
+            println!("  Average delta: {:.4}, setting initial_temp = {:.4}", avg_delta, initial_temp);
+        } else {
+            println!("  No valid deltas found, using default initial_temp = {:.4}", initial_temp);
+        }
+
+        // Calculate cooling rate to reach 1% of initial temp by end
+        cooling_rate = TARGET_FINAL_TEMP_RATIO.powf(1.0 / iterations as f64);
+        println!("  Calculated cooling_rate = {:.6} (will reach {:.0}% by iteration {})", cooling_rate, TARGET_FINAL_TEMP_RATIO * 100.0, iterations);
+    } else if cooling_rate == 0.0 {
+        // Just compute cooling rate from a provided initial_temp
+        cooling_rate = TARGET_FINAL_TEMP_RATIO.powf(1.0 / iterations as f64);
+        println!("Computed cooling_rate = {:.6} (will reach {:.0}% by iteration {})", cooling_rate, TARGET_FINAL_TEMP_RATIO * 100.0, iterations);
+    }
+
     let mut temperature = initial_temp;
     let start_time = Instant::now();
 
-    // Adaptive cooling parameters
+    // Tracking for reporting
     let mut accepts = 0;
     let mut rejects = 0;
-    let check_interval = 10000;
 
-    println!("Starting simulated annealing (incremental scoring + adaptive cooling)...");
-    println!("Initial score: {:.2}", current_score);
+    println!("Starting simulated annealing...");
+    println!("Initial score: {:.2}, Temp: {:.4}, Cooling: {:.6}", current_score, temperature, cooling_rate);
 
     for iteration in 0..iterations {
         // Progress reporting
-        if iteration > 0 && (iteration % 1_000_000 == 0 || iteration == iterations - 1) {
+        if iteration > 0 && (iteration % REPORT_INTERVAL == 0 || iteration == iterations - 1) {
             let elapsed = start_time.elapsed().as_secs_f64();
             let rate = iteration as f64 / elapsed;
             let accept_rate = if accepts + rejects > 0 {
@@ -365,19 +451,6 @@ pub fn optimize_kernel(
                 "Iteration {}/{} ({:.0} iter/s) - Best: {:.2}, Current: {:.2}, Temp: {:.4}, Accept: {:.1}%",
                 iteration, iterations, rate, best_score, current_score, temperature, accept_rate * 100.0
             );
-        }
-
-        // Adaptive cooling: adjust temperature directly based on acceptance rate
-        if iteration > 0 && iteration % check_interval == 0 {
-            let accept_rate = accepts as f64 / (accepts + rejects) as f64;
-            if accept_rate > 0.6 {
-                // Accepting too much, cool down faster
-                temperature *= 0.9;
-            } else if accept_rate < 0.05 {
-                // Barely accepting anything, warm up a bit
-                temperature *= 1.1;
-            }
-            // Otherwise keep normal cooling rate
             accepts = 0;
             rejects = 0;
         }
@@ -458,13 +531,60 @@ mod tests {
     #[test]
     fn test_4x4_optimization() {
         let values: Vec<f32> = (1..=16).map(|x| x as f32).collect();
-        let kernel = optimize_kernel(4, values, 100_000, 10.0, 0.99999, 12345);
+        let kernel = optimize_kernel(4, values, 100_000, 0.0, 0.0, 12345, 1.0);
 
         println!("Optimized 4x4 arrangement:");
         println!("{}", kernel);
 
         let positions = kernel.build_positions();
-        let scorer = IncrementalScorer::new(4, positions);
+        let scorer = IncrementalScorer::new_with_sequence_weight(4, positions, 1.0);
         println!("Score: {:.2}", scorer.total_score());
+    }
+
+    #[test]
+    fn test_manual_vs_auto_calibration() {
+        let values: Vec<f32> = (1..=16).map(|x| x as f32).collect();
+
+        println!("\n=== Manual parameters ===");
+        let kernel1 = optimize_kernel(4, values.clone(), 50_000, 1.0, 0.9999, 12345, 1.0);
+        let positions1 = kernel1.build_positions();
+        let scorer1 = IncrementalScorer::new(4, positions1);
+        let score1 = scorer1.total_score();
+
+        println!("\n=== Auto-calibrated ===");
+        let kernel2 = optimize_kernel(4, values, 50_000, 0.0, 0.0, 12345, 1.0);
+        let positions2 = kernel2.build_positions();
+        let scorer2 = IncrementalScorer::new(4, positions2);
+        let score2 = scorer2.total_score();
+
+        println!("\nScore with manual params: {:.2}", score1);
+        println!("Score with auto-calibration: {:.2}", score2);
+    }
+
+    #[test]
+    fn test_sequence_weight_impact() {
+        let values: Vec<f32> = (1..=16).map(|x| x as f32).collect();
+
+        println!("\n=== No sequence weight (strength=0.0) ===");
+        let kernel1 = optimize_kernel(4, values.clone(), 50_000, 0.0, 0.0, 12345, 0.0);
+        let positions1 = kernel1.build_positions();
+        let scorer1 = IncrementalScorer::new_with_sequence_weight(4, positions1, 0.0);
+        let score1 = scorer1.total_score();
+
+        println!("\n=== Half sequence weight (strength=0.5) ===");
+        let kernel2 = optimize_kernel(4, values.clone(), 50_000, 0.0, 0.0, 12345, 0.5);
+        let positions2 = kernel2.build_positions();
+        let scorer2 = IncrementalScorer::new_with_sequence_weight(4, positions2, 0.5);
+        let score2 = scorer2.total_score();
+
+        println!("\n=== Full sequence weight (strength=1.0) ===");
+        let kernel3 = optimize_kernel(4, values, 50_000, 0.0, 0.0, 12345, 1.0);
+        let positions3 = kernel3.build_positions();
+        let scorer3 = IncrementalScorer::new_with_sequence_weight(4, positions3, 1.0);
+        let score3 = scorer3.total_score();
+
+        println!("\nScore with no sequence weight: {:.2}", score1);
+        println!("Score with half sequence weight: {:.2}", score2);
+        println!("Score with full sequence weight: {:.2}", score3);
     }
 }
