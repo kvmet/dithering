@@ -54,7 +54,8 @@ impl Kernel {
     /// Higher score = better for ordered dithering
     ///
     /// Scoring considers:
-    /// - Toroidal (wrapped) distances between sequential values
+    /// - Toroidal (wrapped) squared distances between sequential values
+    ///   (using squared distance gives quadratic reward, encouraging maximum spread)
     /// - Position-based weighting (early values weighted more)
     /// - Penalties for row/column/diagonal alignment
     /// - Clustering detection within appropriate radius
@@ -74,11 +75,11 @@ impl Kernel {
                 let (r1, c1) = positions[i];
                 let (r2, c2) = positions[j];
 
-                // Calculate wrapped distance (toroidal)
+                // Calculate wrapped distance squared (toroidal)
                 let dr = toroidal_distance_component(r1, r2, self.size);
                 let dc = toroidal_distance_component(c1, c2, self.size);
 
-                let distance = ((dr * dr + dc * dc) as f32).sqrt();
+                let distance_sq = (dr * dr + dc * dc) as f32;
 
                 // Weight by sequence distance (closer in sequence = more important)
                 let sequence_distance = (j - i) as f32;
@@ -90,8 +91,9 @@ impl Kernel {
 
                 let combined_weight = sequence_weight * position_weight;
 
-                // Reward distance, weighted by importance
-                total_score += distance * combined_weight;
+                // Reward distance squared (no sqrt needed, gives more weight to larger distances)
+                // This is fine since we want to maximize separation
+                total_score += distance_sq * combined_weight;
 
                 // Penalties for alignment (causes banding)
                 let alignment_penalty = if r1 == r2 || c1 == c2 {
