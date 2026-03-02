@@ -74,6 +74,7 @@ impl ThresholdKernel {
             3 => 1_000_000,
             4 => 4_500_000,
             5 => 15_000_000,
+            6 => 30_000_000,
             _ => panic!("Unsupported kernel size: {}x{}", width, height),
         };
 

@@ -45,7 +45,7 @@ struct Cli {
         long,
         value_name = "KERNEL",
         default_value = "anneal:4x4",
-        help = "Kernel: bayer2, bayer4, or annealed (anneal:4x4[:SEED], anneal:5x5[:SEED] - omit seed for random, seeds can be alphanumeric)"
+        help = "Kernel: bayer2, bayer4, or annealed (anneal:3x3[:SEED], anneal:4x4[:SEED], anneal:5x5[:SEED], anneal:6x6[:SEED] - omit seed for random, seeds can be alphanumeric)"
     )]
     kernel: String,
 
@@ -205,18 +205,20 @@ fn main() {
             };
 
             match size_part {
+                "3x3" => ThresholdKernel::from_annealing(3, 3, seed),
                 "4x4" => ThresholdKernel::from_annealing(4, 4, seed),
                 "5x5" => ThresholdKernel::from_annealing(5, 5, seed),
+                "6x6" => ThresholdKernel::from_annealing(6, 6, seed),
                 _ => {
                     eprintln!("Invalid kernel size for annealing: {}", size_part);
-                    eprintln!("Available sizes: 4x4, 5x5");
+                    eprintln!("Available sizes: 3x3, 4x4, 5x5, 6x6");
                     std::process::exit(1);
                 }
             }
         } else {
             eprintln!("Invalid kernel format: {}", cli.kernel);
             eprintln!("Use format: anneal:SIZE[:SEED]");
-            eprintln!("Examples: anneal:4x4:abc123, anneal:5x5 (random)");
+            eprintln!("Examples: anneal:4x4:abc123, anneal:5x5 (random), anneal:3x3, anneal:6x6");
             std::process::exit(1);
         }
     } else {
@@ -226,7 +228,7 @@ fn main() {
             _ => {
                 eprintln!("Unknown kernel type: {}", cli.kernel);
                 eprintln!("Available: bayer2, bayer4");
-                eprintln!("Or annealed: anneal:4x4[:SEED], anneal:5x5[:SEED] (omit seed for random, seeds can be alphanumeric)");
+                eprintln!("Or annealed: anneal:3x3[:SEED], anneal:4x4[:SEED], anneal:5x5[:SEED], anneal:6x6[:SEED] (omit seed for random, seeds can be alphanumeric)");
                 std::process::exit(1);
             }
         }
