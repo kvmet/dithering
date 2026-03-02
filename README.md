@@ -111,13 +111,6 @@ image_filters --auto-gamma-offset 1.0 input.jpg output.png
 
 Uses simulated annealing to find kernel arrangements that maximize differences between adjacent cells. This produces high-quality dithering patterns that avoid clustering artifacts.
 
-- For 4x4: Uses constrained optimization (alternating rows pattern) - rows 1,3 contain high values (9-16), rows 2,4 contain low values (1-8)
-- For 5x5: General simulated annealing optimization
-- Same seed always produces the same kernel
-- Omit seed to use current time (generates random alphanumeric seed)
-- Seed can be numeric or alphanumeric string
-- Score 373.02 is optimal for 4x4 kernels
-
 ```bash
 # With specific seed (deterministic)
 image_filters -k anneal:4x4:12345 input.jpg output.png
