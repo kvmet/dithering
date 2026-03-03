@@ -120,6 +120,10 @@ struct Cli {
     /// White threshold for posterize mode (brightness above which all channels = white/no color, 0.0-1.0)
     #[arg(long, value_name = "WHITE_THRESHOLD", default_value = "0.9", help = "White threshold for posterize mode (0.0-1.0)")]
     white_threshold: f32,
+
+    /// Color intensity for posterize mode (screen blend intensity, 0.0=white, 1.0=full color)
+    #[arg(long, value_name = "INTENSITY", default_value = "1.0", help = "Color intensity for posterize mode (0.0-1.0)")]
+    color_intensity: f32,
 }
 
 fn main() {
@@ -455,10 +459,10 @@ fn main() {
         }
         "posterize" => {
             println!(
-                "Processing {} with {} kernel (posterize mode, spread={}, offset={}, angle={:.1}°, erode={}, color_thresh={:.2}, white_thresh={:.2}, gamma={:.2})...",
-                cli.input, cli.kernel, cli.spread_radius, cli.spread_offset, cli.spread_angle, cli.erode_radius, cli.color_threshold, cli.white_threshold, gamma
+                "Processing {} with {} kernel (posterize mode, spread={}, offset={}, angle={:.1}°, erode={}, color_thresh={:.2}, white_thresh={:.2}, intensity={:.2}, gamma={:.2})...",
+                cli.input, cli.kernel, cli.spread_radius, cli.spread_offset, cli.spread_angle, cli.erode_radius, cli.color_threshold, cli.white_threshold, cli.color_intensity, gamma
             );
-            let posterized_rgb = posterize_rgb_spread(&img, cli.spread_radius, cli.spread_offset, cli.spread_angle, cli.erode_radius, cli.color_threshold, cli.white_threshold);
+            let posterized_rgb = posterize_rgb_spread(&img, cli.spread_radius, cli.spread_offset, cli.spread_angle, cli.erode_radius, cli.color_threshold, cli.white_threshold, cli.color_intensity);
             let output = combine_rgb_with_dithered_k(&posterized_rgb, &img, &kernel, gamma);
             save_as_color_png(&output, &cli.output).unwrap_or_else(|e| {
                 eprintln!("Failed to save color PNG '{}': {}", cli.output, e);

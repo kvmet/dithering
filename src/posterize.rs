@@ -18,6 +18,7 @@ pub fn posterize_rgb_spread(
     erode_radius: u32,
     color_threshold: f32,
     white_threshold: f32,
+    color_intensity: f32,
 ) -> ImageBuffer<Rgb<u8>, Vec<u8>> {
     let (width, height) = img.dimensions();
 
@@ -95,6 +96,14 @@ pub fn posterize_rgb_spread(
                 result_g = 1.0;
                 result_b = 1.0;
             }
+
+            // Screen blend semi-transparent white overlay on top
+            // intensity=1.0 -> no white overlay (full color)
+            // intensity=0.0 -> full white overlay (everything becomes white)
+            let white_opacity = 1.0 - color_intensity;
+            result_r = 1.0 - (1.0 - result_r) * (1.0 - white_opacity);
+            result_g = 1.0 - (1.0 - result_g) * (1.0 - white_opacity);
+            result_b = 1.0 - (1.0 - result_b) * (1.0 - white_opacity);
 
             let r = (result_r * 255.0) as u8;
             let g = (result_g * 255.0) as u8;
