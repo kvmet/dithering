@@ -4,6 +4,7 @@ use std::fs::File;
 use std::io::{self, BufWriter};
 use std::path::Path;
 use crate::kernel_expander;
+use crate::kernel_cache;
 
 
 /// Convert sRGB value to linear light (gamma expansion)
@@ -68,6 +69,20 @@ impl ThresholdKernel {
         let size = width;
         let total = size * size;
 
+        // Try to load from cache first
+        if let Some(cached_kernel) = kernel_cache::load_kernel(size, seed) {
+            // Convert from 1..N to 0..1 range
+            let normalized: Vec<f64> = cached_kernel.grid
+                .iter()
+                .map(|&v| v / (total + 1) as f64)
+                .collect();
+
+            return Self::new(width, height, normalized);
+        }
+
+        // Not in cache - compute it
+        println!("Computing kernel {}x{} with seed {} (not found in cache)", size, size, seed);
+
         // Determine iteration counts based on size
         let iterations = match size {
             2 => 100_000,
@@ -82,6 +97,13 @@ impl ThresholdKernel {
         let optimized_kernel = super::kernel_optimizer::OptimizerConfig::new(size, seed)
             .with_iterations(iterations)
             .optimize();
+
+        // Save to cache for next time
+        if let Err(e) = kernel_cache::save_kernel(&optimized_kernel, seed) {
+            eprintln!("Warning: Failed to save kernel to cache: {}", e);
+        } else {
+            println!("Saved kernel to cache");
+        }
 
         // Convert from 1..N to 0..1 range
         let normalized: Vec<f64> = optimized_kernel.grid

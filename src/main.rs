@@ -2,6 +2,7 @@ mod filters;
 mod kernel_optimizer;
 mod kernel_expander;
 mod posterize;
+mod kernel_cache;
 
 use clap::Parser;
 use filters::{

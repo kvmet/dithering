@@ -7,3 +7,5 @@ edition = "2024"
 clap = { version = "4.5.60", features = ["derive"] }
 image = { version = "0.25.9", default-features = false, features = ["png", "bmp", "tiff", "webp", "gif"] }
 png = "0.18.1"
+serde = { version = "1.0.228", features = ["derive"] }
+toml = { version = "1.0.3", features = ["serde"] }
