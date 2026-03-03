@@ -212,41 +212,42 @@ fn spread_channels_max2(
     }
 
     let (width, height) = r_mask.dimensions();
-    let mut r_output = ImageBuffer::new(width, height);
-    let mut g_output = ImageBuffer::new(width, height);
-    let mut b_output = ImageBuffer::new(width, height);
-    let radius_f = radius as f32;
-    let radius_sq = (radius_f * radius_f) as i32;
 
-    for y in 0..height {
-        for x in 0..width {
-            // Start with current pixel's colors
-            let current_r = r_mask.get_pixel(x, y)[0] > 128;
-            let current_g = g_mask.get_pixel(x, y)[0] > 128;
-            let current_b = b_mask.get_pixel(x, y)[0] > 128;
+    // Start with copies of input masks
+    let mut r_current = r_mask.clone();
+    let mut g_current = g_mask.clone();
+    let mut b_current = b_mask.clone();
 
-            // Check what colors want to spread into this pixel from neighbors
-            let mut wants_r = current_r;
-            let mut wants_g = current_g;
-            let mut wants_b = current_b;
+    // Iterate radius times, spreading by 1 pixel each iteration
+    // This gives O(n × radius) instead of O(n × radius²)
+    for _ in 0..radius {
+        let mut r_next = r_current.clone();
+        let mut g_next = g_current.clone();
+        let mut b_next = b_current.clone();
 
-            // Check all pixels within circular radius
-            let y_min = (y as i32 - radius as i32).max(0) as u32;
-            let y_max = (y as i32 + radius as i32).min(height as i32 - 1) as u32;
-            let x_min = (x as i32 - radius as i32).max(0) as u32;
-            let x_max = (x as i32 + radius as i32).min(width as i32 - 1) as u32;
+        for y in 0..height {
+            for x in 0..width {
+                let current_r = r_current.get_pixel(x, y)[0] > 128;
+                let current_g = g_current.get_pixel(x, y)[0] > 128;
+                let current_b = b_current.get_pixel(x, y)[0] > 128;
 
-            for ny in y_min..=y_max {
-                for nx in x_min..=x_max {
-                    // Check if within circular distance
-                    let dx = nx as i32 - x as i32;
-                    let dy = ny as i32 - y as i32;
-                    let dist_sq = dx * dx + dy * dy;
+                let mut wants_r = current_r;
+                let mut wants_g = current_g;
+                let mut wants_b = current_b;
 
-                    if dist_sq <= radius_sq && dist_sq > 0 {
-                        let neighbor_r = r_mask.get_pixel(nx, ny)[0] > 128;
-                        let neighbor_g = g_mask.get_pixel(nx, ny)[0] > 128;
-                        let neighbor_b = b_mask.get_pixel(nx, ny)[0] > 128;
+                // Check 4-connected neighbors (faster than 8-connected for circular spread)
+                let neighbors = [
+                    (x.wrapping_sub(1), y),
+                    (x + 1, y),
+                    (x, y.wrapping_sub(1)),
+                    (x, y + 1),
+                ];
+
+                for (nx, ny) in neighbors {
+                    if nx < width && ny < height {
+                        let neighbor_r = r_current.get_pixel(nx, ny)[0] > 128;
+                        let neighbor_g = g_current.get_pixel(nx, ny)[0] > 128;
+                        let neighbor_b = b_current.get_pixel(nx, ny)[0] > 128;
 
                         // Check if neighbor shares at least one color with current pixel
                         let shares_color = (neighbor_r && current_r) ||
@@ -263,27 +264,31 @@ fn spread_channels_max2(
                         }
                     }
                 }
+
+                // Count how many colors want this pixel
+                let count = wants_r as u8 + wants_g as u8 + wants_b as u8;
+
+                // Apply max-2-color rule
+                let (final_r, final_g, final_b) = if count <= 2 {
+                    // 0, 1, or 2 colors - allow all
+                    (wants_r, wants_g, wants_b)
+                } else {
+                    // All 3 colors want this pixel - keep current state
+                    (current_r, current_g, current_b)
+                };
+
+                r_next.put_pixel(x, y, Rgb([if final_r { 255 } else { 0 }; 3]));
+                g_next.put_pixel(x, y, Rgb([if final_g { 255 } else { 0 }; 3]));
+                b_next.put_pixel(x, y, Rgb([if final_b { 255 } else { 0 }; 3]));
             }
-
-            // Count how many colors want this pixel
-            let count = wants_r as u8 + wants_g as u8 + wants_b as u8;
-
-            // Apply max-2-color rule
-            let (final_r, final_g, final_b) = if count <= 2 {
-                // 0, 1, or 2 colors - allow all
-                (wants_r, wants_g, wants_b)
-            } else {
-                // All 3 colors somehow still want this pixel - keep current state
-                (current_r, current_g, current_b)
-            };
-
-            r_output.put_pixel(x, y, Rgb([if final_r { 255 } else { 0 }; 3]));
-            g_output.put_pixel(x, y, Rgb([if final_g { 255 } else { 0 }; 3]));
-            b_output.put_pixel(x, y, Rgb([if final_b { 255 } else { 0 }; 3]));
         }
+
+        r_current = r_next;
+        g_current = g_next;
+        b_current = b_next;
     }
 
-    (r_output, g_output, b_output)
+    (r_current, g_current, b_current)
 }
 
 /// Erode all RGB channels together using combined mask
