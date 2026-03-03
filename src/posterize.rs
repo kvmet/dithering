@@ -16,12 +16,14 @@ pub fn posterize_rgb_spread(
     spread_offset: i32,
     spread_angle: f32,
     erode_radius: u32,
-    threshold: f32,
+    color_threshold: f32,
+    white_threshold: f32,
 ) -> ImageBuffer<Rgb<u8>, Vec<u8>> {
     let (width, height) = img.dimensions();
 
     // Step 1: Extract R, G, B channels as separate boolean masks
-    let (r_mask, g_mask, b_mask) = extract_rgb_channels(img, threshold);
+    // Enforce max 2 colors per pixel (keep strongest 1-2 channels)
+    let (r_mask, g_mask, b_mask) = extract_rgb_channels_max2(img, color_threshold, white_threshold);
 
     // Step 2: Shift each channel by offset in different directions (120° apart)
     let r_shifted = if spread_offset > 0 {
@@ -42,10 +44,8 @@ pub fn posterize_rgb_spread(
         b_mask.clone()
     };
 
-    // Step 3: Spread each shifted channel independently
-    let r_spread = spread_channel(&r_shifted, spread_radius);
-    let g_spread = spread_channel(&g_shifted, spread_radius);
-    let b_spread = spread_channel(&b_shifted, spread_radius);
+    // Step 3: Spread all channels together with 2-color-max enforcement
+    let (r_spread, g_spread, b_spread) = spread_channels_max2(&r_shifted, &g_shifted, &b_shifted, spread_radius);
 
     // Step 3.5: Optionally erode to round corners (morphological closing)
     // Erode across all channels - any color protects neighboring colors
@@ -107,9 +107,11 @@ pub fn posterize_rgb_spread(
     output
 }
 
-/// Extract R, G, B channels as separate boolean masks
+/// Extract R, G, B channels with max 2 colors per pixel
 /// Returns (R_mask, G_mask, B_mask) where 255 = channel is on, 0 = channel is off
-fn extract_rgb_channels(img: &DynamicImage, threshold: f32) -> (ImageBuffer<Rgb<u8>, Vec<u8>>, ImageBuffer<Rgb<u8>, Vec<u8>>, ImageBuffer<Rgb<u8>, Vec<u8>>) {
+/// Only keeps the strongest 1 or 2 channels per pixel
+/// Pixels above white_threshold on all channels are treated as white (no colors)
+fn extract_rgb_channels_max2(img: &DynamicImage, color_threshold: f32, white_threshold: f32) -> (ImageBuffer<Rgb<u8>, Vec<u8>>, ImageBuffer<Rgb<u8>, Vec<u8>>, ImageBuffer<Rgb<u8>, Vec<u8>>) {
     let (width, height) = img.dimensions();
     let mut r_mask = ImageBuffer::new(width, height);
     let mut g_mask = ImageBuffer::new(width, height);
@@ -122,14 +124,39 @@ fn extract_rgb_channels(img: &DynamicImage, threshold: f32) -> (ImageBuffer<Rgb<
             let g = pixel[1] as f32 / 255.0;
             let b = pixel[2] as f32 / 255.0;
 
-            // Threshold each channel independently
-            let r_on = if r > threshold { 255 } else { 0 };
-            let g_on = if g > threshold { 255 } else { 0 };
-            let b_on = if b > threshold { 255 } else { 0 };
+            // Check if this is a white pixel (all channels above white threshold)
+            let is_white = r >= white_threshold && g >= white_threshold && b >= white_threshold;
 
-            r_mask.put_pixel(x, y, Rgb([r_on, r_on, r_on]));
-            g_mask.put_pixel(x, y, Rgb([g_on, g_on, g_on]));
-            b_mask.put_pixel(x, y, Rgb([b_on, b_on, b_on]));
+            // Determine which channels are above color threshold
+            let r_above = r > color_threshold && !is_white;
+            let g_above = g > color_threshold && !is_white;
+            let b_above = b > color_threshold && !is_white;
+
+            let count = r_above as u8 + g_above as u8 + b_above as u8;
+
+            let (r_on, g_on, b_on) = if count <= 2 {
+                // 0, 1, or 2 channels - keep all above threshold
+                (r_above, g_above, b_above)
+            } else {
+                // All 3 channels above threshold - keep strongest 2
+                // Sort by value, keep top 2
+                let mut channels = vec![
+                    (r, 0), // 0 = R
+                    (g, 1), // 1 = G
+                    (b, 2), // 2 = B
+                ];
+                channels.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap());
+
+                let keep_r = channels[0].1 == 0 || channels[1].1 == 0;
+                let keep_g = channels[0].1 == 1 || channels[1].1 == 1;
+                let keep_b = channels[0].1 == 2 || channels[1].1 == 2;
+
+                (keep_r, keep_g, keep_b)
+            };
+
+            r_mask.put_pixel(x, y, Rgb([if r_on { 255 } else { 0 }; 3]));
+            g_mask.put_pixel(x, y, Rgb([if g_on { 255 } else { 0 }; 3]));
+            b_mask.put_pixel(x, y, Rgb([if b_on { 255 } else { 0 }; 3]));
         }
     }
 
@@ -160,21 +187,39 @@ fn shift_channel(mask: &ImageBuffer<Rgb<u8>, Vec<u8>>, offset: i32, angle_degree
     output
 }
 
-/// Spread a single channel mask using circular dilation
-/// Input: grayscale image where 255 = channel on, 0 = channel off
-fn spread_channel(mask: &ImageBuffer<Rgb<u8>, Vec<u8>>, radius: u32) -> ImageBuffer<Rgb<u8>, Vec<u8>> {
+/// Spread all channels together with max 2 colors enforcement
+/// Rules:
+/// - Colors can only spread into pixels that share at least one color
+/// - This prevents 3-color collisions naturally
+/// - Max 2 colors per pixel enforced
+fn spread_channels_max2(
+    r_mask: &ImageBuffer<Rgb<u8>, Vec<u8>>,
+    g_mask: &ImageBuffer<Rgb<u8>, Vec<u8>>,
+    b_mask: &ImageBuffer<Rgb<u8>, Vec<u8>>,
+    radius: u32,
+) -> (ImageBuffer<Rgb<u8>, Vec<u8>>, ImageBuffer<Rgb<u8>, Vec<u8>>, ImageBuffer<Rgb<u8>, Vec<u8>>) {
     if radius == 0 {
-        return mask.clone();
+        return (r_mask.clone(), g_mask.clone(), b_mask.clone());
     }
 
-    let (width, height) = mask.dimensions();
-    let mut output = ImageBuffer::new(width, height);
+    let (width, height) = r_mask.dimensions();
+    let mut r_output = ImageBuffer::new(width, height);
+    let mut g_output = ImageBuffer::new(width, height);
+    let mut b_output = ImageBuffer::new(width, height);
     let radius_f = radius as f32;
     let radius_sq = (radius_f * radius_f) as i32;
 
     for y in 0..height {
         for x in 0..width {
-            let mut is_on = false;
+            // Start with current pixel's colors
+            let current_r = r_mask.get_pixel(x, y)[0] > 128;
+            let current_g = g_mask.get_pixel(x, y)[0] > 128;
+            let current_b = b_mask.get_pixel(x, y)[0] > 128;
+
+            // Check what colors want to spread into this pixel from neighbors
+            let mut wants_r = current_r;
+            let mut wants_g = current_g;
+            let mut wants_b = current_b;
 
             // Check all pixels within circular radius
             let y_min = (y as i32 - radius as i32).max(0) as u32;
@@ -189,25 +234,47 @@ fn spread_channel(mask: &ImageBuffer<Rgb<u8>, Vec<u8>>, radius: u32) -> ImageBuf
                     let dy = ny as i32 - y as i32;
                     let dist_sq = dx * dx + dy * dy;
 
-                    if dist_sq <= radius_sq {
-                        let pixel = mask.get_pixel(nx, ny)[0];
-                        if pixel > 128 {
-                            is_on = true;
-                            break;
+                    if dist_sq <= radius_sq && dist_sq > 0 {
+                        let neighbor_r = r_mask.get_pixel(nx, ny)[0] > 128;
+                        let neighbor_g = g_mask.get_pixel(nx, ny)[0] > 128;
+                        let neighbor_b = b_mask.get_pixel(nx, ny)[0] > 128;
+
+                        // Check if neighbor shares at least one color with current pixel
+                        let shares_color = (neighbor_r && current_r) ||
+                                          (neighbor_g && current_g) ||
+                                          (neighbor_b && current_b);
+
+                        // If current pixel has no colors, any neighbor can spread in
+                        let can_spread = shares_color || (!current_r && !current_g && !current_b);
+
+                        if can_spread {
+                            if neighbor_r { wants_r = true; }
+                            if neighbor_g { wants_g = true; }
+                            if neighbor_b { wants_b = true; }
                         }
                     }
                 }
-                if is_on {
-                    break;
-                }
             }
 
-            let value = if is_on { 255 } else { 0 };
-            output.put_pixel(x, y, Rgb([value, value, value]));
+            // Count how many colors want this pixel
+            let count = wants_r as u8 + wants_g as u8 + wants_b as u8;
+
+            // Apply max-2-color rule
+            let (final_r, final_g, final_b) = if count <= 2 {
+                // 0, 1, or 2 colors - allow all
+                (wants_r, wants_g, wants_b)
+            } else {
+                // All 3 colors somehow still want this pixel - keep current state
+                (current_r, current_g, current_b)
+            };
+
+            r_output.put_pixel(x, y, Rgb([if final_r { 255 } else { 0 }; 3]));
+            g_output.put_pixel(x, y, Rgb([if final_g { 255 } else { 0 }; 3]));
+            b_output.put_pixel(x, y, Rgb([if final_b { 255 } else { 0 }; 3]));
         }
     }
 
-    output
+    (r_output, g_output, b_output)
 }
 
 /// Erode all RGB channels together using combined mask

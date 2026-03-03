@@ -113,9 +113,13 @@ struct Cli {
     #[arg(long, value_name = "PIXELS", default_value = "0", help = "Erode radius for posterize mode (rounds corners)")]
     erode_radius: u32,
 
-    /// Threshold for posterize mode (where to cut off RGB channels, 0.0-1.0)
-    #[arg(long, value_name = "THRESHOLD", default_value = "0.5", help = "Posterize threshold for RGB channel cutoff (0.0-1.0)")]
-    posterize_threshold: f32,
+    /// Color threshold for posterize mode (minimum brightness to be considered "on", 0.0-1.0)
+    #[arg(long, value_name = "COLOR_THRESHOLD", default_value = "0.2", help = "Color threshold for posterize mode (0.0-1.0)")]
+    color_threshold: f32,
+
+    /// White threshold for posterize mode (brightness above which all channels = white/no color, 0.0-1.0)
+    #[arg(long, value_name = "WHITE_THRESHOLD", default_value = "0.9", help = "White threshold for posterize mode (0.0-1.0)")]
+    white_threshold: f32,
 }
 
 fn main() {
@@ -451,10 +455,10 @@ fn main() {
         }
         "posterize" => {
             println!(
-                "Processing {} with {} kernel (posterize mode, spread={}, offset={}, angle={:.1}°, erode={}, threshold={:.2}, gamma={:.2})...",
-                cli.input, cli.kernel, cli.spread_radius, cli.spread_offset, cli.spread_angle, cli.erode_radius, cli.posterize_threshold, gamma
+                "Processing {} with {} kernel (posterize mode, spread={}, offset={}, angle={:.1}°, erode={}, color_thresh={:.2}, white_thresh={:.2}, gamma={:.2})...",
+                cli.input, cli.kernel, cli.spread_radius, cli.spread_offset, cli.spread_angle, cli.erode_radius, cli.color_threshold, cli.white_threshold, gamma
             );
-            let posterized_rgb = posterize_rgb_spread(&img, cli.spread_radius, cli.spread_offset, cli.spread_angle, cli.erode_radius, cli.posterize_threshold);
+            let posterized_rgb = posterize_rgb_spread(&img, cli.spread_radius, cli.spread_offset, cli.spread_angle, cli.erode_radius, cli.color_threshold, cli.white_threshold);
             let output = combine_rgb_with_dithered_k(&posterized_rgb, &img, &kernel, gamma);
             save_as_color_png(&output, &cli.output).unwrap_or_else(|e| {
                 eprintln!("Failed to save color PNG '{}': {}", cli.output, e);
