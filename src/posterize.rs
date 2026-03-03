@@ -15,6 +15,7 @@ pub fn posterize_rgb_spread(
     spread_radius: u32,
     spread_offset: i32,
     spread_angle: f32,
+    erode_radius: u32,
 ) -> ImageBuffer<Rgb<u8>, Vec<u8>> {
     let (width, height) = img.dimensions();
 
@@ -45,14 +46,31 @@ pub fn posterize_rgb_spread(
     let g_spread = spread_channel(&g_shifted, spread_radius);
     let b_spread = spread_channel(&b_shifted, spread_radius);
 
+    // Step 3.5: Optionally erode to round corners (morphological closing)
+    let r_final = if erode_radius > 0 {
+        erode_channel(&r_spread, erode_radius)
+    } else {
+        r_spread
+    };
+    let g_final = if erode_radius > 0 {
+        erode_channel(&g_spread, erode_radius)
+    } else {
+        g_spread
+    };
+    let b_final = if erode_radius > 0 {
+        erode_channel(&b_spread, erode_radius)
+    } else {
+        b_spread
+    };
+
     // Step 4: Recombine RGB with reflect blending
     let mut output = ImageBuffer::new(width, height);
 
     for y in 0..height {
         for x in 0..width {
-            let r_on = r_spread.get_pixel(x, y)[0] > 128;
-            let g_on = g_spread.get_pixel(x, y)[0] > 128;
-            let b_on = b_spread.get_pixel(x, y)[0] > 128;
+            let r_on = r_final.get_pixel(x, y)[0] > 128;
+            let g_on = g_final.get_pixel(x, y)[0] > 128;
+            let b_on = b_final.get_pixel(x, y)[0] > 128;
 
             // Screen blend: 1 - (1 - a) * (1 - b)
             // Start with black (0, 0, 0) and screen blend each active channel
@@ -188,6 +206,57 @@ fn spread_channel(mask: &ImageBuffer<Rgb<u8>, Vec<u8>>, radius: u32) -> ImageBuf
                     }
                 }
                 if is_on {
+                    break;
+                }
+            }
+
+            let value = if is_on { 255 } else { 0 };
+            output.put_pixel(x, y, Rgb([value, value, value]));
+        }
+    }
+
+    output
+}
+
+/// Erode a single channel mask using circular erosion
+/// Input: grayscale image where 255 = channel on, 0 = channel off
+/// This shrinks white regions, rounding out corners
+fn erode_channel(mask: &ImageBuffer<Rgb<u8>, Vec<u8>>, radius: u32) -> ImageBuffer<Rgb<u8>, Vec<u8>> {
+    if radius == 0 {
+        return mask.clone();
+    }
+
+    let (width, height) = mask.dimensions();
+    let mut output = ImageBuffer::new(width, height);
+    let radius_f = radius as f32;
+    let radius_sq = (radius_f * radius_f) as i32;
+
+    for y in 0..height {
+        for x in 0..width {
+            let mut is_on = true;
+
+            // Check all pixels within circular radius
+            let y_min = (y as i32 - radius as i32).max(0) as u32;
+            let y_max = (y as i32 + radius as i32).min(height as i32 - 1) as u32;
+            let x_min = (x as i32 - radius as i32).max(0) as u32;
+            let x_max = (x as i32 + radius as i32).min(width as i32 - 1) as u32;
+
+            for ny in y_min..=y_max {
+                for nx in x_min..=x_max {
+                    // Check if within circular distance
+                    let dx = nx as i32 - x as i32;
+                    let dy = ny as i32 - y as i32;
+                    let dist_sq = dx * dx + dy * dy;
+
+                    if dist_sq <= radius_sq {
+                        let pixel = mask.get_pixel(nx, ny)[0];
+                        if pixel <= 128 {
+                            is_on = false;
+                            break;
+                        }
+                    }
+                }
+                if !is_on {
                     break;
                 }
             }

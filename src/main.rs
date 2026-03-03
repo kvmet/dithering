@@ -108,6 +108,10 @@ struct Cli {
     /// Spread angle for posterize mode (direction to shift CMY channels, in degrees)
     #[arg(long, value_name = "DEGREES", default_value = "0.0", help = "Angle for CMY channel shifting (0=right, 90=down, etc.)")]
     spread_angle: f32,
+
+    /// Erode radius for posterize mode (shrinks colors after spreading to round corners)
+    #[arg(long, value_name = "PIXELS", default_value = "0", help = "Erode radius for posterize mode (rounds corners)")]
+    erode_radius: u32,
 }
 
 fn main() {
@@ -443,10 +447,10 @@ fn main() {
         }
         "posterize" => {
             println!(
-                "Processing {} with {} kernel (posterize mode, spread={}, offset={}, angle={:.1}°, gamma={:.2})...",
-                cli.input, cli.kernel, cli.spread_radius, cli.spread_offset, cli.spread_angle, gamma
+                "Processing {} with {} kernel (posterize mode, spread={}, offset={}, angle={:.1}°, erode={}, gamma={:.2})...",
+                cli.input, cli.kernel, cli.spread_radius, cli.spread_offset, cli.spread_angle, cli.erode_radius, gamma
             );
-            let posterized_rgb = posterize_rgb_spread(&img, cli.spread_radius, cli.spread_offset, cli.spread_angle);
+            let posterized_rgb = posterize_rgb_spread(&img, cli.spread_radius, cli.spread_offset, cli.spread_angle, cli.erode_radius);
             let output = combine_rgb_with_dithered_k(&posterized_rgb, &img, &kernel, gamma);
             save_as_color_png(&output, &cli.output).unwrap_or_else(|e| {
                 eprintln!("Failed to save color PNG '{}': {}", cli.output, e);
