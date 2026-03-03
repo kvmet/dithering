@@ -192,7 +192,7 @@ fn main() {
             let size_part = parts[1];
 
             // If no seed provided, generate a short random alphanumeric seed
-            let (seed, _seed_str) = if parts.len() == 3 {
+            let (seed, seed_str) = if parts.len() == 3 {
                 let seed_str = parts[2].to_string();
                 // Try to parse as number first, otherwise hash the string
                 let seed = seed_str.parse::<u64>().unwrap_or_else(|_| {
@@ -222,10 +222,10 @@ fn main() {
             };
 
             match size_part {
-                "3x3" => ThresholdKernel::from_annealing(3, 3, seed),
-                "4x4" => ThresholdKernel::from_annealing(4, 4, seed),
-                "5x5" => ThresholdKernel::from_annealing(5, 5, seed),
-                "6x6" => ThresholdKernel::from_annealing(6, 6, seed),
+                "3x3" => ThresholdKernel::from_annealing_with_string(3, 3, seed, Some(seed_str)),
+                "4x4" => ThresholdKernel::from_annealing_with_string(4, 4, seed, Some(seed_str)),
+                "5x5" => ThresholdKernel::from_annealing_with_string(5, 5, seed, Some(seed_str)),
+                "6x6" => ThresholdKernel::from_annealing_with_string(6, 6, seed, Some(seed_str)),
                 _ => {
                     eprintln!("Invalid kernel size for annealing: {}", size_part);
                     eprintln!("Available sizes: 3x3, 4x4, 5x5, 6x6");

@@ -15,14 +15,17 @@ const KERNELS_DIR: &str = "kernels";
 struct KernelFile {
     size: usize,
     seed: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    seed_string: Option<String>,
     grid: Vec<f64>,
 }
 
 /// Try to load a cached kernel matching the given size and seed
 ///
 /// Searches all .toml files in the kernels/ directory for a match.
+/// Can match by numeric seed or by seed_string (if the string hashes to the seed).
 /// Returns None if no matching kernel is found.
-pub fn load_kernel(size: usize, seed: u64) -> Option<Kernel> {
+pub fn load_kernel(size: usize, seed: u64, seed_string: Option<&str>) -> Option<Kernel> {
     let kernels_path = Path::new(KERNELS_DIR);
 
     if !kernels_path.exists() {
@@ -42,11 +45,23 @@ pub fn load_kernel(size: usize, seed: u64) -> Option<Kernel> {
         // Try to read and parse the file
         if let Ok(contents) = fs::read_to_string(&path) {
             if let Ok(kernel_file) = toml::from_str::<KernelFile>(&contents) {
-                // Check if this matches our size and seed
-                if kernel_file.size == size && kernel_file.seed == seed {
-                    // Validate the grid size matches
-                    if kernel_file.grid.len() == size * size {
-                        return Some(Kernel::new(size, kernel_file.grid));
+                // Check if this matches our size
+                if kernel_file.size == size {
+                    // Check if seed matches (numeric)
+                    let seed_matches = kernel_file.seed == seed;
+
+                    // Or check if seed_string matches (if provided)
+                    let string_matches = if let (Some(search_str), Some(file_str)) = (seed_string, &kernel_file.seed_string) {
+                        search_str == file_str
+                    } else {
+                        false
+                    };
+
+                    if seed_matches || string_matches {
+                        // Validate the grid size matches
+                        if kernel_file.grid.len() == size * size {
+                            return Some(Kernel::new(size, kernel_file.grid));
+                        }
                     }
                 }
             }
@@ -58,9 +73,9 @@ pub fn load_kernel(size: usize, seed: u64) -> Option<Kernel> {
 
 /// Save a kernel to a TOML file in the kernels/ directory
 ///
-/// The filename will be `kernel_{size}x{size}_seed{seed}.toml` by default.
+/// The filename will include the seed_string if provided, otherwise the numeric seed.
 /// Creates the kernels/ directory if it doesn't exist.
-pub fn save_kernel(kernel: &Kernel, seed: u64) -> Result<PathBuf, std::io::Error> {
+pub fn save_kernel(kernel: &Kernel, seed: u64, seed_string: Option<String>) -> Result<PathBuf, std::io::Error> {
     let kernels_path = Path::new(KERNELS_DIR);
 
     // Create kernels directory if it doesn't exist
@@ -71,13 +86,18 @@ pub fn save_kernel(kernel: &Kernel, seed: u64) -> Result<PathBuf, std::io::Error
     let kernel_file = KernelFile {
         size: kernel.size,
         seed,
+        seed_string: seed_string.clone(),
         grid: kernel.grid.clone(),
     };
 
     let toml_string = toml::to_string_pretty(&kernel_file)
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
 
-    let filename = format!("kernel_{}x{}_seed{}.toml", kernel.size, kernel.size, seed);
+    let filename = if let Some(ref s) = seed_string {
+        format!("kernel_{}x{}_seed{}.toml", kernel.size, kernel.size, s)
+    } else {
+        format!("kernel_{}x{}_seed{}.toml", kernel.size, kernel.size, seed)
+    };
     let filepath = kernels_path.join(filename);
 
     fs::write(&filepath, toml_string)?;
@@ -94,6 +114,7 @@ mod tests {
         let kernel_file = KernelFile {
             size: 2,
             seed: 12345,
+            seed_string: Some("test".to_string()),
             grid: vec![1.0, 2.0, 3.0, 4.0],
         };
 
@@ -102,6 +123,7 @@ mod tests {
 
         assert_eq!(parsed.size, 2);
         assert_eq!(parsed.seed, 12345);
+        assert_eq!(parsed.seed_string, Some("test".to_string()));
         assert_eq!(parsed.grid, vec![1.0, 2.0, 3.0, 4.0]);
     }
 }

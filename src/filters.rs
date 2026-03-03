@@ -65,12 +65,21 @@ impl ThresholdKernel {
     /// * `height` - Kernel height (must equal width - only square kernels supported)
     /// * `seed` - Random seed for optimization (can be numeric or alphanumeric string converted to u64)
     pub fn from_annealing(width: usize, height: usize, seed: u64) -> Self {
+        Self::from_annealing_with_string(width, height, seed, None)
+    }
+
+    /// Generate an optimized kernel with optional seed string for caching
+    ///
+    /// Same as from_annealing but accepts an optional seed_string for better cache matching.
+    /// If seed_string is provided, it will be stored in the cache file and can be used
+    /// to look up the kernel later.
+    pub fn from_annealing_with_string(width: usize, height: usize, seed: u64, seed_string: Option<String>) -> Self {
         assert_eq!(width, height, "Only square kernels are supported");
         let size = width;
         let total = size * size;
 
         // Try to load from cache first
-        if let Some(cached_kernel) = kernel_cache::load_kernel(size, seed) {
+        if let Some(cached_kernel) = kernel_cache::load_kernel(size, seed, seed_string.as_deref()) {
             // Convert from 1..N to 0..1 range
             let normalized: Vec<f64> = cached_kernel.grid
                 .iter()
@@ -99,7 +108,7 @@ impl ThresholdKernel {
             .optimize();
 
         // Save to cache for next time
-        if let Err(e) = kernel_cache::save_kernel(&optimized_kernel, seed) {
+        if let Err(e) = kernel_cache::save_kernel(&optimized_kernel, seed, seed_string) {
             eprintln!("Warning: Failed to save kernel to cache: {}", e);
         } else {
             println!("Saved kernel to cache");
