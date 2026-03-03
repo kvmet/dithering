@@ -105,6 +105,39 @@ pub fn save_kernel(kernel: &Kernel, seed: u64, seed_string: Option<String>) -> R
     Ok(filepath)
 }
 
+/// List all cached kernels of a given size
+///
+/// Returns a vector of (seed, seed_string) tuples for all cached kernels matching the size.
+pub fn list_cached_kernels(size: usize) -> Vec<(u64, Option<String>)> {
+    let kernels_path = Path::new(KERNELS_DIR);
+
+    if !kernels_path.exists() {
+        return Vec::new();
+    }
+
+    let mut kernels = Vec::new();
+
+    if let Ok(entries) = fs::read_dir(kernels_path) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+
+            if path.extension().and_then(|s| s.to_str()) != Some("toml") {
+                continue;
+            }
+
+            if let Ok(contents) = fs::read_to_string(&path) {
+                if let Ok(kernel_file) = toml::from_str::<KernelFile>(&contents) {
+                    if kernel_file.size == size {
+                        kernels.push((kernel_file.seed, kernel_file.seed_string));
+                    }
+                }
+            }
+        }
+    }
+
+    kernels
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

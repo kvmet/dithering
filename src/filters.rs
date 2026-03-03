@@ -74,6 +74,20 @@ impl ThresholdKernel {
     /// If seed_string is provided, it will be stored in the cache file and can be used
     /// to look up the kernel later.
     pub fn from_annealing_with_string(width: usize, height: usize, seed: u64, seed_string: Option<String>) -> Self {
+        Self::from_annealing_with_weights(width, height, seed, seed_string, super::kernel_optimizer::GeometryWeights::default())
+    }
+
+    /// Generate an optimized kernel with custom geometry weights
+    ///
+    /// Allows full control over the kernel optimization process including custom
+    /// geometry weights for different spatial relationships.
+    pub fn from_annealing_with_weights(
+        width: usize,
+        height: usize,
+        seed: u64,
+        seed_string: Option<String>,
+        weights: super::kernel_optimizer::GeometryWeights,
+    ) -> Self {
         assert_eq!(width, height, "Only square kernels are supported");
         let size = width;
         let total = size * size;
@@ -105,6 +119,7 @@ impl ThresholdKernel {
         // Use the optimized kernel_optimizer module with builder API
         let optimized_kernel = super::kernel_optimizer::OptimizerConfig::new(size, seed)
             .with_iterations(iterations)
+            .with_geometry_weights(weights)
             .optimize();
 
         // Save to cache for next time
