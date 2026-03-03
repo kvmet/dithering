@@ -48,20 +48,11 @@ pub fn posterize_rgb_spread(
     let b_spread = spread_channel(&b_shifted, spread_radius);
 
     // Step 3.5: Optionally erode to round corners (morphological closing)
-    let r_final = if erode_radius > 0 {
-        erode_channel(&r_spread, erode_radius)
+    // Erode across all channels - any color protects neighboring colors
+    let (r_final, g_final, b_final) = if erode_radius > 0 {
+        erode_channels_combined(&r_spread, &g_spread, &b_spread, erode_radius)
     } else {
-        r_spread
-    };
-    let g_final = if erode_radius > 0 {
-        erode_channel(&g_spread, erode_radius)
-    } else {
-        g_spread
-    };
-    let b_final = if erode_radius > 0 {
-        erode_channel(&b_spread, erode_radius)
-    } else {
-        b_spread
+        (r_spread, g_spread, b_spread)
     };
 
     // Step 4: Recombine RGB with reflect blending
@@ -219,22 +210,30 @@ fn spread_channel(mask: &ImageBuffer<Rgb<u8>, Vec<u8>>, radius: u32) -> ImageBuf
     output
 }
 
-/// Erode a single channel mask using circular erosion
-/// Input: grayscale image where 255 = channel on, 0 = channel off
-/// This shrinks white regions, rounding out corners
-fn erode_channel(mask: &ImageBuffer<Rgb<u8>, Vec<u8>>, radius: u32) -> ImageBuffer<Rgb<u8>, Vec<u8>> {
+/// Erode all RGB channels together using combined mask
+/// A pixel stays "on" in a channel only if ANY color is present nearby
+/// This allows different color channels to protect each other from erosion
+fn erode_channels_combined(
+    r_mask: &ImageBuffer<Rgb<u8>, Vec<u8>>,
+    g_mask: &ImageBuffer<Rgb<u8>, Vec<u8>>,
+    b_mask: &ImageBuffer<Rgb<u8>, Vec<u8>>,
+    radius: u32,
+) -> (ImageBuffer<Rgb<u8>, Vec<u8>>, ImageBuffer<Rgb<u8>, Vec<u8>>, ImageBuffer<Rgb<u8>, Vec<u8>>) {
     if radius == 0 {
-        return mask.clone();
+        return (r_mask.clone(), g_mask.clone(), b_mask.clone());
     }
 
-    let (width, height) = mask.dimensions();
-    let mut output = ImageBuffer::new(width, height);
+    let (width, height) = r_mask.dimensions();
+    let mut r_output = ImageBuffer::new(width, height);
+    let mut g_output = ImageBuffer::new(width, height);
+    let mut b_output = ImageBuffer::new(width, height);
     let radius_f = radius as f32;
     let radius_sq = (radius_f * radius_f) as i32;
 
     for y in 0..height {
         for x in 0..width {
-            let mut is_on = true;
+            // Check if this pixel should stay on based on combined color presence nearby
+            let mut any_color_nearby = false;
 
             // Check all pixels within circular radius
             let y_min = (y as i32 - radius as i32).max(0) as u32;
@@ -250,24 +249,40 @@ fn erode_channel(mask: &ImageBuffer<Rgb<u8>, Vec<u8>>, radius: u32) -> ImageBuff
                     let dist_sq = dx * dx + dy * dy;
 
                     if dist_sq <= radius_sq {
-                        let pixel = mask.get_pixel(nx, ny)[0];
-                        if pixel <= 128 {
-                            is_on = false;
+                        // Check if ANY channel is on at this location
+                        let r_on = r_mask.get_pixel(nx, ny)[0] > 128;
+                        let g_on = g_mask.get_pixel(nx, ny)[0] > 128;
+                        let b_on = b_mask.get_pixel(nx, ny)[0] > 128;
+
+                        if r_on || g_on || b_on {
+                            any_color_nearby = true;
                             break;
                         }
                     }
                 }
-                if !is_on {
+                if any_color_nearby {
                     break;
                 }
             }
 
-            let value = if is_on { 255 } else { 0 };
-            output.put_pixel(x, y, Rgb([value, value, value]));
+            // Each channel stays on only if:
+            // 1. It was originally on at this pixel, AND
+            // 2. There's any color nearby (protects from erosion)
+            let r_was_on = r_mask.get_pixel(x, y)[0] > 128;
+            let g_was_on = g_mask.get_pixel(x, y)[0] > 128;
+            let b_was_on = b_mask.get_pixel(x, y)[0] > 128;
+
+            let r_value = if r_was_on && any_color_nearby { 255 } else { 0 };
+            let g_value = if g_was_on && any_color_nearby { 255 } else { 0 };
+            let b_value = if b_was_on && any_color_nearby { 255 } else { 0 };
+
+            r_output.put_pixel(x, y, Rgb([r_value, r_value, r_value]));
+            g_output.put_pixel(x, y, Rgb([g_value, g_value, g_value]));
+            b_output.put_pixel(x, y, Rgb([b_value, b_value, b_value]));
         }
     }
 
-    output
+    (r_output, g_output, b_output)
 }
 
 /// Combine posterized RGB with K channel using ordered dithering
