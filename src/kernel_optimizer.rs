@@ -47,11 +47,11 @@ pub struct GeometryWeights {
 impl Default for GeometryWeights {
     fn default() -> Self {
         Self {
-            vertical: 0.2,
-            horizontal: 0.2,
+            vertical: 0.15,
+            horizontal: 0.15,
             positive_diagonal: 0.3,
             negative_diagonal: 0.3,
-            knight: 0.5,
+            knight: 0.25,
             other: 1.0,
         }
     }
