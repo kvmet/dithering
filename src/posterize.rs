@@ -16,11 +16,12 @@ pub fn posterize_rgb_spread(
     spread_offset: i32,
     spread_angle: f32,
     erode_radius: u32,
+    threshold: f32,
 ) -> ImageBuffer<Rgb<u8>, Vec<u8>> {
     let (width, height) = img.dimensions();
 
     // Step 1: Extract R, G, B channels as separate boolean masks
-    let (r_mask, g_mask, b_mask) = extract_rgb_channels(img);
+    let (r_mask, g_mask, b_mask) = extract_rgb_channels(img, threshold);
 
     // Step 2: Shift each channel by offset in different directions (120° apart)
     let r_shifted = if spread_offset > 0 {
@@ -117,7 +118,7 @@ pub fn posterize_rgb_spread(
 
 /// Extract R, G, B channels as separate boolean masks
 /// Returns (R_mask, G_mask, B_mask) where 255 = channel is on, 0 = channel is off
-fn extract_rgb_channels(img: &DynamicImage) -> (ImageBuffer<Rgb<u8>, Vec<u8>>, ImageBuffer<Rgb<u8>, Vec<u8>>, ImageBuffer<Rgb<u8>, Vec<u8>>) {
+fn extract_rgb_channels(img: &DynamicImage, threshold: f32) -> (ImageBuffer<Rgb<u8>, Vec<u8>>, ImageBuffer<Rgb<u8>, Vec<u8>>, ImageBuffer<Rgb<u8>, Vec<u8>>) {
     let (width, height) = img.dimensions();
     let mut r_mask = ImageBuffer::new(width, height);
     let mut g_mask = ImageBuffer::new(width, height);
@@ -130,10 +131,10 @@ fn extract_rgb_channels(img: &DynamicImage) -> (ImageBuffer<Rgb<u8>, Vec<u8>>, I
             let g = pixel[1] as f32 / 255.0;
             let b = pixel[2] as f32 / 255.0;
 
-            // Threshold each channel independently (>0.5 = on)
-            let r_on = if r > 0.5 { 255 } else { 0 };
-            let g_on = if g > 0.5 { 255 } else { 0 };
-            let b_on = if b > 0.5 { 255 } else { 0 };
+            // Threshold each channel independently
+            let r_on = if r > threshold { 255 } else { 0 };
+            let g_on = if g > threshold { 255 } else { 0 };
+            let b_on = if b > threshold { 255 } else { 0 };
 
             r_mask.put_pixel(x, y, Rgb([r_on, r_on, r_on]));
             g_mask.put_pixel(x, y, Rgb([g_on, g_on, g_on]));
